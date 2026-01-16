@@ -1,13 +1,15 @@
-import { findRoot, dbPath } from "../workspace";
 import { getDb } from "../db";
+import { findRoot } from "../workspace";
 
 export async function pasteJd(roleId: string): Promise<void> {
-  const root = findRoot();
-  const db = getDb(dbPath(root));
+  findRoot();
+  const db = getDb();
 
-  const role = db.query<{ id: string; title: string }, [string]>(
-    "SELECT id, title FROM roles WHERE id = ?"
-  ).get(roleId);
+  const roleRows = (await db.unsafe(
+    "SELECT id, title FROM roles WHERE id = $1",
+    [roleId]
+  )) as Array<{ id: string; title: string }>;
+  const role = roleRows[0];
 
   if (!role) {
     console.error(`Role not found: ${roleId}`);
@@ -32,7 +34,10 @@ export async function pasteJd(roleId: string): Promise<void> {
     process.exit(1);
   }
 
-  db.run("UPDATE roles SET jd_text = ?, updated_at = datetime('now') WHERE id = ?", [jdText, roleId]);
+  await db.unsafe("UPDATE roles SET jd_text = $1, updated_at = now()::text WHERE id = $2", [
+    jdText,
+    roleId,
+  ]);
 
   console.log(`\nSaved job description (${jdText.length} chars) for ${role.title}`);
 }

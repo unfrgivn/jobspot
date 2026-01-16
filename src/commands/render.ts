@@ -1,18 +1,20 @@
-import { existsSync, readFileSync } from "fs";
+import { existsSync } from "fs";
 import { join, dirname } from "path";
-import { findRoot, dbPath } from "../workspace";
+import { findRoot } from "../workspace";
 import { getDb } from "../db";
 import { loadConfig } from "../config";
 import { renderPdf } from "../render/pandoc";
 
 export async function renderCoverLetter(applicationId: string): Promise<void> {
   const root = findRoot();
-  const db = getDb(dbPath(root));
+  const db = getDb();
   const config = loadConfig(root);
 
-  const artifact = db.query<{ path: string }, [string, string]>(
-    "SELECT path FROM artifacts WHERE application_id = ? AND kind = ?"
-  ).get(applicationId, "cover_letter_md");
+  const artifactRows = (await db.unsafe(
+    "SELECT path FROM artifacts WHERE application_id = $1 AND kind = $2",
+    [applicationId, "cover_letter_md"]
+  )) as Array<{ path: string }>;
+  const artifact = artifactRows[0];
 
   if (!artifact) {
     console.error(`No cover letter markdown found for application: ${applicationId}`);

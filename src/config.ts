@@ -91,6 +91,9 @@ export interface Secrets {
   google_calendar_client_id?: string;
   google_calendar_client_secret?: string;
   google_calendar_refresh_token?: string;
+  google_oauth_client_id?: string;
+  google_oauth_client_secret?: string;
+  google_oauth_redirect_uri?: string;
 }
 
 const DEFAULT_CONFIG: Config = {
@@ -147,6 +150,9 @@ export function loadSecrets(): Secrets {
     google_calendar_client_id: process.env.GOOGLE_CALENDAR_CLIENT_ID,
     google_calendar_client_secret: process.env.GOOGLE_CALENDAR_CLIENT_SECRET,
     google_calendar_refresh_token: process.env.GOOGLE_CALENDAR_REFRESH_TOKEN,
+    google_oauth_client_id: process.env.GOOGLE_OAUTH_CLIENT_ID,
+    google_oauth_client_secret: process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+    google_oauth_redirect_uri: process.env.GOOGLE_OAUTH_REDIRECT_URI,
   };
 }
 

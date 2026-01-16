@@ -1,32 +1,25 @@
-import type { Database } from "bun:sqlite";
 import { v4 as uuidv4 } from "uuid";
+import type { DbClient } from "./index";
 
 export interface CandidateContext {
   id: string;
   user_profile_id: string;
-  
-  // AI-synthesized context sections
   executive_summary: string | null;
   key_strengths: string | null;
   leadership_narrative: string | null;
   technical_expertise: string | null;
   impact_highlights: string | null;
   career_trajectory: string | null;
-  
-  // Source metadata
   linkedin_scraped_at: string | null;
   portfolio_scraped_at: string | null;
   resume_parsed_at: string | null;
-  
-  // Full context blob for AI prompts
   full_context: string | null;
-  
   created_at: string;
   updated_at: string;
 }
 
-export function initCandidateContextTable(db: Database): void {
-  db.run(`
+export async function initCandidateContextTable(db: DbClient): Promise<void> {
+  await db.unsafe(`
     CREATE TABLE IF NOT EXISTS candidate_context (
       id TEXT PRIMARY KEY,
       user_profile_id TEXT NOT NULL,
@@ -40,38 +33,43 @@ export function initCandidateContextTable(db: Database): void {
       portfolio_scraped_at TEXT,
       resume_parsed_at TEXT,
       full_context TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (now()::text),
+      updated_at TEXT NOT NULL DEFAULT (now()::text),
       FOREIGN KEY (user_profile_id) REFERENCES user_profile(id)
     )
   `);
 }
 
-export function getCandidateContext(db: Database, userProfileId: string): CandidateContext | null {
-  const row = db.query(`
-    SELECT * FROM candidate_context 
-    WHERE user_profile_id = ? 
-    ORDER BY updated_at DESC 
-    LIMIT 1
-  `).get(userProfileId);
-  
-  return row as CandidateContext | null;
+export async function getCandidateContext(
+  db: DbClient,
+  userProfileId: string
+): Promise<CandidateContext | null> {
+  const rows = (await db.unsafe(
+    `SELECT * FROM candidate_context
+     WHERE user_profile_id = $1
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [userProfileId]
+  )) as CandidateContext[];
+
+  return rows[0] ?? null;
 }
 
-export function createCandidateContext(
-  db: Database,
+export async function createCandidateContext(
+  db: DbClient,
   userProfileId: string,
   context: Partial<CandidateContext>
-): CandidateContext {
+): Promise<CandidateContext> {
   const id = uuidv4();
-  
-  db.run(
+
+  const rows = (await db.unsafe(
     `INSERT INTO candidate_context (
-      id, user_profile_id, executive_summary, key_strengths, 
-      leadership_narrative, technical_expertise, impact_highlights, 
-      career_trajectory, linkedin_scraped_at, portfolio_scraped_at, 
+      id, user_profile_id, executive_summary, key_strengths,
+      leadership_narrative, technical_expertise, impact_highlights,
+      career_trajectory, linkedin_scraped_at, portfolio_scraped_at,
       resume_parsed_at, full_context
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    RETURNING *`,
     [
       id,
       userProfileId,
@@ -86,19 +84,20 @@ export function createCandidateContext(
       context.resume_parsed_at || null,
       context.full_context || null,
     ]
-  );
-  
-  return getCandidateContext(db, userProfileId)!;
+  )) as CandidateContext[];
+
+  return rows[0]!;
 }
 
-export function updateCandidateContext(
-  db: Database,
+export async function updateCandidateContext(
+  db: DbClient,
   id: string,
   updates: Partial<CandidateContext>
-): CandidateContext {
+): Promise<CandidateContext> {
   const sets: string[] = [];
-  const values: any[] = [];
-  
+  const values: Array<string | null> = [];
+  let index = 1;
+
   const fields = [
     "executive_summary",
     "key_strengths",
@@ -111,20 +110,22 @@ export function updateCandidateContext(
     "resume_parsed_at",
     "full_context",
   ] as const;
-  
+
   for (const field of fields) {
     if (updates[field] !== undefined) {
-      sets.push(`${field} = ?`);
-      values.push(updates[field]);
+      sets.push(`${field} = $${index++}`);
+      values.push(updates[field] ?? null);
     }
   }
-  
+
   if (sets.length > 0) {
-    sets.push("updated_at = datetime('now')");
+    sets.push("updated_at = now()::text");
     values.push(id);
-    db.run(`UPDATE candidate_context SET ${sets.join(", ")} WHERE id = ?`, values);
+    const query = `UPDATE candidate_context SET ${sets.join(", ")} WHERE id = $${index} RETURNING *`;
+    const rows = (await db.unsafe(query, values)) as CandidateContext[];
+    return rows[0]!;
   }
-  
-  const row = db.query(`SELECT * FROM candidate_context WHERE id = ?`).get(id);
-  return row as CandidateContext;
+
+  const rows = (await db.unsafe("SELECT * FROM candidate_context WHERE id = $1", [id])) as CandidateContext[];
+  return rows[0]!;
 }

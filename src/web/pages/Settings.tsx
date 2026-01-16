@@ -1046,7 +1046,7 @@ export function Settings() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="bg-slate-50 p-4 rounded-lg border text-sm text-slate-600 leading-relaxed">
-                <p className="mb-2 font-medium text-slate-900">JobSearch Agent v1.0.0</p>
+                <p className="mb-2 font-medium text-slate-900">JobSpot v1.0.0</p>
                 <p>
                   A personalized career copilot designed to help you manage your job search pipeline, 
                   generate tailored cover letters, and track your applications with intelligent insights.

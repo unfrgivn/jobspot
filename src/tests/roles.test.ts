@@ -1,5 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { Database } from "bun:sqlite";
+import postgres from "postgres";
 import {
   createRole,
   getRoleById,
@@ -7,76 +6,40 @@ import {
   deleteRole,
   type CreateRoleInput,
 } from "../db/roles";
-import {
-  createCompany,
-} from "../db/companies";
+import { createCompany } from "../db/companies";
+import { runMigrations, type DbClient } from "../db";
+
+const testDbUrl = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL;
+
+if (!testDbUrl) {
+  throw new Error("TEST_DATABASE_URL or DATABASE_URL must be set to run tests");
+}
 
 describe("roles database operations", () => {
-  let db: Database;
+  let db: DbClient;
   let testCompanyId: string;
 
-  beforeEach(() => {
-    db = new Database(":memory:");
-    
-    db.run(`
-      CREATE TABLE companies (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        website TEXT,
-        headquarters TEXT,
-        logo_url TEXT,
-        description TEXT,
-        notes TEXT,
-        industry TEXT,
-        funding_status TEXT,
-        company_size TEXT,
-        established_date TEXT,
-        research_sources TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
-      )
-    `);
+  beforeAll(async () => {
+    db = postgres(testDbUrl, { max: 1 });
+    await runMigrations(db);
+  });
 
-    db.run(`
-      CREATE TABLE roles (
-        id TEXT PRIMARY KEY,
-        company_id TEXT NOT NULL REFERENCES companies(id),
-        title TEXT NOT NULL,
-        level TEXT,
-        location TEXT,
-        job_url TEXT,
-        jd_text TEXT,
-        source TEXT,
-        compensation_range TEXT,
-        compensation_min INTEGER,
-        compensation_max INTEGER,
-        linkedin_message TEXT,
-        cover_letter TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
-      )
-    `);
+  afterAll(async () => {
+    await db.end({ timeout: 5 });
+  });
 
-    db.run(`
-      CREATE TABLE role_research (
-        id TEXT PRIMARY KEY,
-        role_id TEXT NOT NULL REFERENCES roles(id),
-        content TEXT,
-        created_at TEXT DEFAULT (datetime('now'))
-      )
-    `);
+  beforeEach(async () => {
+    await db.unsafe(
+      "TRUNCATE TABLE application_questions, role_research, candidate_context, events, tasks, artifacts, interviews, contacts, applications, roles, companies, user_profile RESTART IDENTITY CASCADE"
+    );
 
-    const company = createCompany(db, { name: "Test Company" });
+    const company = await createCompany(db, { name: "Test Company" });
     testCompanyId = company.id;
   });
 
-  afterEach(() => {
-    db.close();
-  });
-
   describe("createRole", () => {
-    test("creates role with required fields", () => {
-      const role = createRole(db, {
+    test("creates role with required fields", async () => {
+      const role = await createRole(db, {
         company_id: testCompanyId,
         title: "Software Engineer",
       });
@@ -86,7 +49,7 @@ describe("roles database operations", () => {
       expect(role.title).toBe("Software Engineer");
     });
 
-    test("creates role with all fields", () => {
+    test("creates role with all fields", async () => {
       const input: CreateRoleInput = {
         company_id: testCompanyId,
         title: "Senior Engineer",
@@ -100,7 +63,7 @@ describe("roles database operations", () => {
         compensation_max: 200000,
       };
 
-      const role = createRole(db, input);
+      const role = await createRole(db, input);
 
       expect(role.title).toBe("Senior Engineer");
       expect(role.level).toBe("Senior");
@@ -112,72 +75,72 @@ describe("roles database operations", () => {
   });
 
   describe("getRoleById", () => {
-    test("returns role when found", () => {
-      const created = createRole(db, {
+    test("returns role when found", async () => {
+      const created = await createRole(db, {
         company_id: testCompanyId,
         title: "Product Manager",
       });
 
-      const found = getRoleById(db, created.id);
+      const found = await getRoleById(db, created.id);
 
       expect(found).not.toBeNull();
       expect(found?.id).toBe(created.id);
       expect(found?.title).toBe("Product Manager");
     });
 
-    test("returns null when not found", () => {
-      const found = getRoleById(db, "nonexistent-id");
+    test("returns null when not found", async () => {
+      const found = await getRoleById(db, "nonexistent-id");
       expect(found).toBeNull();
     });
   });
 
   describe("updateRole", () => {
-    test("updates single field", () => {
-      const created = createRole(db, {
+    test("updates single field", async () => {
+      const created = await createRole(db, {
         company_id: testCompanyId,
         title: "Engineer",
       });
 
-      const updated = updateRole(db, created.id, {
+      const updated = await updateRole(db, created.id, {
         title: "Senior Engineer",
       });
 
       expect(updated.title).toBe("Senior Engineer");
     });
 
-    test("updates linkedin_message field", () => {
-      const created = createRole(db, {
+    test("updates linkedin_message field", async () => {
+      const created = await createRole(db, {
         company_id: testCompanyId,
         title: "Engineer",
       });
 
-      const updated = updateRole(db, created.id, {
+      const updated = await updateRole(db, created.id, {
         linkedin_message: "Hi, I'm interested in this role...",
       });
 
       expect(updated.linkedin_message).toBe("Hi, I'm interested in this role...");
     });
 
-    test("updates cover_letter field", () => {
-      const created = createRole(db, {
+    test("updates cover_letter field", async () => {
+      const created = await createRole(db, {
         company_id: testCompanyId,
         title: "Engineer",
       });
 
-      const updated = updateRole(db, created.id, {
+      const updated = await updateRole(db, created.id, {
         cover_letter: "Dear Hiring Manager...",
       });
 
       expect(updated.cover_letter).toBe("Dear Hiring Manager...");
     });
 
-    test("updates multiple fields", () => {
-      const created = createRole(db, {
+    test("updates multiple fields", async () => {
+      const created = await createRole(db, {
         company_id: testCompanyId,
         title: "Engineer",
       });
 
-      const updated = updateRole(db, created.id, {
+      const updated = await updateRole(db, created.id, {
         jd_text: "New job description",
         location: "Remote",
         compensation_range: "$100k-$150k",
@@ -190,30 +153,20 @@ describe("roles database operations", () => {
   });
 
   describe("deleteRole", () => {
-    test("removes role from database", () => {
-      const created = createRole(db, {
+    test("removes role from database", async () => {
+      const created = await createRole(db, {
         company_id: testCompanyId,
         title: "To Delete",
       });
 
-      db.run(`CREATE TABLE IF NOT EXISTS tasks (id TEXT, application_id TEXT)`);
-      db.run(`CREATE TABLE IF NOT EXISTS interviews (id TEXT, application_id TEXT)`);
-      db.run(`CREATE TABLE IF NOT EXISTS applications (id TEXT, role_id TEXT)`);
-      db.run(`CREATE TABLE IF NOT EXISTS questions (id TEXT, role_id TEXT)`);
+      await deleteRole(db, created.id);
 
-      deleteRole(db, created.id);
-
-      const found = getRoleById(db, created.id);
+      const found = await getRoleById(db, created.id);
       expect(found).toBeNull();
     });
 
-    test("does not throw when deleting nonexistent role", () => {
-      db.run(`CREATE TABLE IF NOT EXISTS tasks (id TEXT, application_id TEXT)`);
-      db.run(`CREATE TABLE IF NOT EXISTS interviews (id TEXT, application_id TEXT)`);
-      db.run(`CREATE TABLE IF NOT EXISTS applications (id TEXT, role_id TEXT)`);
-      db.run(`CREATE TABLE IF NOT EXISTS questions (id TEXT, role_id TEXT)`);
-
-      expect(() => deleteRole(db, "nonexistent")).not.toThrow();
+    test("does not throw when deleting nonexistent role", async () => {
+      await expect(deleteRole(db, "nonexistent")).resolves.toBeDefined();
     });
   });
 });

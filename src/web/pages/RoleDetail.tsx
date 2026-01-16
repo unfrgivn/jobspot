@@ -9,9 +9,33 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs"
 import { useToast } from "../components/ui/toast";
 import { cn } from "../lib/utils";
 
-const parseUTCDate = (dateString: string) => {
-  return new Date(dateString.includes('Z') ? dateString : dateString + 'Z');
+const normalizeDbTimestamp = (value: string) => {
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+
+  const hasTimezone = /[zZ]|[+-]\d{2}:?\d{2}$/.test(trimmed);
+  if (trimmed.includes("T")) {
+    return hasTimezone ? trimmed : `${trimmed}Z`;
+  }
+
+  const [datePart, timePart] = trimmed.split(" ");
+  if (!timePart) return trimmed;
+  if (timePart.endsWith("Z")) {
+    return `${datePart}T${timePart}`;
+  }
+
+  const offsetMatch = timePart.match(/([+-]\d{2})(?::?(\d{2}))?$/);
+  if (offsetMatch) {
+    const offsetHours = offsetMatch[1];
+    const offsetMinutes = offsetMatch[2] ?? "00";
+    const timeWithoutOffset = timePart.slice(0, timePart.length - offsetMatch[0].length);
+    return `${datePart}T${timeWithoutOffset}${offsetHours}:${offsetMinutes}`;
+  }
+
+  return `${datePart}T${timePart}Z`;
 };
+
+const parseUTCDate = (dateString: string) => new Date(normalizeDbTimestamp(dateString));
 import { 
   ArrowLeft,
   ArrowRight,
@@ -714,7 +738,7 @@ export function RoleDetail() {
   const openInterviewDialog = (interview?: Interview) => {
     if (interview) {
       setEditingInterview(interview);
-      const scheduledDate = new Date(interview.scheduled_at);
+      const scheduledDate = parseUTCDate(interview.scheduled_at);
       const localISO = new Date(scheduledDate.getTime() - scheduledDate.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
       setInterviewForm({
         scheduled_at: localISO,

@@ -1,5 +1,5 @@
-import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
+import type { DbClient } from "./index";
 
 export interface RoleResearch {
   id: string;
@@ -12,25 +12,34 @@ export interface RoleResearch {
   updated_at: string;
 }
 
-export function getResearchByRoleId(db: Database, roleId: string): RoleResearch | null {
-  return (
-    db
-      .query<RoleResearch, [string]>("SELECT * FROM role_research WHERE role_id = ?")
-      .get(roleId) ?? null
-  );
+export async function getResearchByRoleId(
+  db: DbClient,
+  userId: string,
+  roleId: string
+): Promise<RoleResearch | null> {
+  const rows = (await db.unsafe(
+    "SELECT * FROM role_research WHERE user_id = $1 AND role_id = $2",
+    [userId, roleId]
+  )) as RoleResearch[];
+  return rows[0] ?? null;
 }
 
-export function createResearch(db: Database, roleId: string): RoleResearch {
+export async function createResearch(
+  db: DbClient,
+  userId: string,
+  roleId: string
+): Promise<RoleResearch> {
   const id = randomUUID();
-  db.run(
-    "INSERT INTO role_research (id, role_id) VALUES (?, ?)",
-    [id, roleId]
-  );
-  return getResearchByRoleId(db, roleId)!;
+  const rows = (await db.unsafe(
+    "INSERT INTO role_research (id, user_id, role_id) VALUES ($1, $2, $3) RETURNING *",
+    [id, userId, roleId]
+  )) as RoleResearch[];
+  return rows[0]!;
 }
 
-export function updateResearch(
-  db: Database,
+export async function updateResearch(
+  db: DbClient,
+  userId: string,
   roleId: string,
   updates: {
     company_profile?: string;
@@ -38,40 +47,48 @@ export function updateResearch(
     interview_questions?: string;
     talking_points?: string;
   }
-): RoleResearch {
+): Promise<RoleResearch> {
   const sets: string[] = [];
   const values: (string | null)[] = [];
+  let index = 1;
 
   if (updates.company_profile !== undefined) {
-    sets.push("company_profile = ?");
+    sets.push(`company_profile = $${index++}`);
     values.push(updates.company_profile);
   }
   if (updates.fit_analysis !== undefined) {
-    sets.push("fit_analysis = ?");
+    sets.push(`fit_analysis = $${index++}`);
     values.push(updates.fit_analysis);
   }
   if (updates.interview_questions !== undefined) {
-    sets.push("interview_questions = ?");
+    sets.push(`interview_questions = $${index++}`);
     values.push(updates.interview_questions);
   }
   if (updates.talking_points !== undefined) {
-    sets.push("talking_points = ?");
+    sets.push(`talking_points = $${index++}`);
     values.push(updates.talking_points);
   }
 
   if (sets.length > 0) {
-    sets.push("updated_at = datetime('now')");
-    values.push(roleId);
-    db.run(
-      `UPDATE role_research SET ${sets.join(", ")} WHERE role_id = ?`,
-      values
-    );
+    sets.push("updated_at = now()::text");
+    values.push(userId, roleId);
+    const query = `UPDATE role_research SET ${sets.join(", ")} WHERE user_id = $${index} AND role_id = $${index + 1} RETURNING *`;
+    const rows = (await db.unsafe(query, values)) as RoleResearch[];
+    return rows[0]!;
   }
 
-  return getResearchByRoleId(db, roleId)!;
+  const rows = (await db.unsafe(
+    "SELECT * FROM role_research WHERE user_id = $1 AND role_id = $2",
+    [userId, roleId]
+  )) as RoleResearch[];
+  return rows[0]!;
 }
 
-export function getOrCreateResearch(db: Database, roleId: string): RoleResearch {
-  const existing = getResearchByRoleId(db, roleId);
-  return existing ?? createResearch(db, roleId);
+export async function getOrCreateResearch(
+  db: DbClient,
+  userId: string,
+  roleId: string
+): Promise<RoleResearch> {
+  const existing = await getResearchByRoleId(db, userId, roleId);
+  return existing ?? createResearch(db, userId, roleId);
 }

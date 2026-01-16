@@ -1,19 +1,28 @@
 import { Outlet, Link, useLocation } from "react-router-dom";
-import { LayoutDashboard, Kanban, PlusCircle, Settings, Briefcase, CheckSquare, WifiOff } from "lucide-react";
+import { LayoutDashboard, Kanban, PlusCircle, Settings, Briefcase, CheckSquare, WifiOff, LogOut, User } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useState, useEffect } from "react";
+import { useAuth } from "../lib/auth-context";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
 
 const navItems = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/pipeline", icon: Kanban, label: "Pipeline" },
   { to: "/tasks", icon: CheckSquare, label: "Tasks" },
   { to: "/roles/new", icon: PlusCircle, label: "Add Role" },
-  { to: "/settings", icon: Settings, label: "Settings" },
 ];
 
 export function Layout() {
   const location = useLocation();
   const [backendConnected, setBackendConnected] = useState(true);
+  const { user, logout } = useAuth();
 
   useEffect(() => {
     const checkHealth = async () => {
@@ -41,7 +50,7 @@ export function Layout() {
             <div className="bg-primary/10 p-1.5 rounded-lg">
               <Briefcase className="h-5 w-5 text-primary" />
             </div>
-            <span className="hidden sm:inline bg-gradient-to-r from-slate-900 to-slate-600 bg-clip-text text-transparent">JobSearch Agent</span>
+            <span className="hidden sm:inline bg-gradient-to-r from-slate-900 to-slate-600 bg-clip-text text-transparent">JobSpot</span>
             <span className="sm:hidden">Jobs</span>
           </Link>
           
@@ -75,6 +84,41 @@ export function Layout() {
             })}
           </nav>
 
+          <div className="hidden md:flex items-center gap-4 pl-4 ml-2 border-l h-8">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button className="relative h-8 w-8 rounded-full overflow-hidden border bg-muted hover:opacity-80 transition-opacity outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
+                  {user?.avatar_url ? (
+                    <img src={user.avatar_url} alt={user.name || "User"} className="h-full w-full object-cover" />
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center bg-primary/10 text-primary">
+                      <User className="h-4 w-4" />
+                    </div>
+                  )}
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56">
+                <div className="flex items-center justify-start gap-2 p-2">
+                  <div className="flex flex-col space-y-1 leading-none">
+                    {user?.name && <p className="font-medium">{user.name}</p>}
+                    {user?.email && <p className="w-[200px] truncate text-xs text-muted-foreground">{user.email}</p>}
+                  </div>
+                </div>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem asChild>
+                  <Link to="/settings" className="cursor-pointer">
+                    <Settings className="mr-2 h-4 w-4" />
+                    <span>Settings</span>
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={logout} className="cursor-pointer text-red-600 focus:text-red-600">
+                  <LogOut className="mr-2 h-4 w-4" />
+                  <span>Log out</span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+
           <nav className="ml-auto flex md:hidden items-center gap-1">
             {navItems.map((item) => {
               const isActive = location.pathname.startsWith(item.to);
@@ -94,6 +138,38 @@ export function Layout() {
                 </Link>
               );
             })}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button className="relative h-8 w-8 ml-2 rounded-full overflow-hidden border bg-muted hover:opacity-80 transition-opacity outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
+                  {user?.avatar_url ? (
+                    <img src={user.avatar_url} alt={user.name || "User"} className="h-full w-full object-cover" />
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center bg-primary/10 text-primary">
+                      <User className="h-4 w-4" />
+                    </div>
+                  )}
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56">
+                <div className="flex items-center justify-start gap-2 p-2">
+                  <div className="flex flex-col space-y-1 leading-none">
+                    {user?.name && <p className="font-medium">{user.name}</p>}
+                    {user?.email && <p className="w-[200px] truncate text-xs text-muted-foreground">{user.email}</p>}
+                  </div>
+                </div>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem asChild>
+                  <Link to="/settings" className="cursor-pointer">
+                    <Settings className="mr-2 h-4 w-4" />
+                    <span>Settings</span>
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={logout} className="cursor-pointer text-red-600 focus:text-red-600">
+                  <LogOut className="mr-2 h-4 w-4" />
+                  <span>Log out</span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </nav>
         </div>
       </header>
@@ -103,3 +179,4 @@ export function Layout() {
     </div>
   );
 }
+

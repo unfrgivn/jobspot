@@ -15,9 +15,33 @@ import {
   Plus
 } from "lucide-react";
 
-const parseUTCDate = (dateString: string) => {
-  return new Date(dateString.includes('Z') ? dateString : dateString + 'Z');
+const normalizeDbTimestamp = (value: string) => {
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+
+  const hasTimezone = /[zZ]|[+-]\d{2}:?\d{2}$/.test(trimmed);
+  if (trimmed.includes("T")) {
+    return hasTimezone ? trimmed : `${trimmed}Z`;
+  }
+
+  const [datePart, timePart] = trimmed.split(" ");
+  if (!timePart) return trimmed;
+  if (timePart.endsWith("Z")) {
+    return `${datePart}T${timePart}`;
+  }
+
+  const offsetMatch = timePart.match(/([+-]\d{2})(?::?(\d{2}))?$/);
+  if (offsetMatch) {
+    const offsetHours = offsetMatch[1];
+    const offsetMinutes = offsetMatch[2] ?? "00";
+    const timeWithoutOffset = timePart.slice(0, timePart.length - offsetMatch[0].length);
+    return `${datePart}T${timeWithoutOffset}${offsetHours}:${offsetMinutes}`;
+  }
+
+  return `${datePart}T${timePart}Z`;
 };
+
+const parseUTCDate = (dateString: string) => new Date(normalizeDbTimestamp(dateString));
 
 type Status = "wishlist" | "applied" | "interviewing" | "offer" | "rejected" | "withdrawn";
 

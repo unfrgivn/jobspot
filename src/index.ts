@@ -1,4 +1,8 @@
 #!/usr/bin/env bun
+
+console.error("CLI commands are disabled. Use the web UI.");
+process.exit(1);
+
 import { program } from "commander";
 import { init } from "./commands/init";
 import { doctor } from "./commands/doctor";

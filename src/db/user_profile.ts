@@ -1,7 +1,8 @@
-import { Database } from "bun:sqlite";
+import type { DbClient } from "./index";
 
 export interface UserProfile {
   id: string;
+  user_id: string;
   full_name: string | null;
   email: string | null;
   phone: string | null;
@@ -22,10 +23,11 @@ export interface UserProfile {
   updated_at: string;
 }
 
-export function initUserProfileTable(db: Database): void {
-  db.run(`
+export async function initUserProfileTable(db: DbClient): Promise<void> {
+  await db.unsafe(`
     CREATE TABLE IF NOT EXISTS user_profile (
       id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
       full_name TEXT,
       email TEXT,
       phone TEXT,
@@ -42,42 +44,43 @@ export function initUserProfileTable(db: Database): void {
       resume_file_path TEXT,
       google_calendar_refresh_token TEXT,
       google_calendar_id TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      created_at TEXT NOT NULL DEFAULT (now()::text),
+      updated_at TEXT NOT NULL DEFAULT (now()::text)
     )
   `);
-  
-  const columns = db.query<{ name: string }, []>("PRAGMA table_info(user_profile)").all();
-  const columnNames = columns.map(c => c.name);
-  
-  if (!columnNames.includes("resume_text")) {
-    db.run("ALTER TABLE user_profile ADD COLUMN resume_text TEXT");
-  }
-  if (!columnNames.includes("resume_file_path")) {
-    db.run("ALTER TABLE user_profile ADD COLUMN resume_file_path TEXT");
-  }
-  if (!columnNames.includes("google_calendar_refresh_token")) {
-    db.run("ALTER TABLE user_profile ADD COLUMN google_calendar_refresh_token TEXT");
-  }
-  if (!columnNames.includes("google_calendar_id")) {
-    db.run("ALTER TABLE user_profile ADD COLUMN google_calendar_id TEXT");
-  }
+
+  await db.unsafe("ALTER TABLE user_profile ADD COLUMN IF NOT EXISTS user_id TEXT");
+  await db.unsafe("ALTER TABLE user_profile ADD COLUMN IF NOT EXISTS resume_text TEXT");
+  await db.unsafe("ALTER TABLE user_profile ADD COLUMN IF NOT EXISTS resume_file_path TEXT");
+  await db.unsafe("ALTER TABLE user_profile ADD COLUMN IF NOT EXISTS google_calendar_refresh_token TEXT");
+  await db.unsafe("ALTER TABLE user_profile ADD COLUMN IF NOT EXISTS google_calendar_id TEXT");
+  await db.unsafe("CREATE INDEX IF NOT EXISTS idx_user_profile_user_id ON user_profile(user_id)");
 }
 
-export function getUserProfile(db: Database): UserProfile | null {
-  return db.query<UserProfile, []>("SELECT * FROM user_profile LIMIT 1").get() ?? null;
+export async function getUserProfile(db: DbClient, userId: string): Promise<UserProfile | null> {
+  const rows = (await db.unsafe(
+    "SELECT * FROM user_profile WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1",
+    [userId]
+  )) as UserProfile[];
+  return rows[0] ?? null;
 }
 
-export function createUserProfile(db: Database, profile: Partial<UserProfile>): UserProfile {
+export async function createUserProfile(
+  db: DbClient,
+  userId: string,
+  profile: Partial<UserProfile>
+): Promise<UserProfile> {
   const id = profile.id || crypto.randomUUID();
-  
-  db.run(
+
+  const rows = (await db.unsafe(
     `INSERT INTO user_profile (
-      id, full_name, email, phone, linkedin_url, portfolio_url, about_me, why_looking,
+      id, user_id, full_name, email, phone, linkedin_url, portfolio_url, about_me, why_looking,
       building_teams, ai_shift, experience_json, cover_letter_tone, cover_letter_structure
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+    RETURNING *`,
     [
       id,
+      userId,
       profile.full_name || null,
       profile.email || null,
       profile.phone || null,
@@ -91,89 +94,93 @@ export function createUserProfile(db: Database, profile: Partial<UserProfile>): 
       profile.cover_letter_tone || null,
       profile.cover_letter_structure || null,
     ]
-  );
+  )) as UserProfile[];
 
-  return getUserProfile(db)!;
+  return rows[0]!;
 }
 
-export function updateUserProfile(
-  db: Database,
+export async function updateUserProfile(
+  db: DbClient,
   id: string,
   updates: Partial<UserProfile>
-): UserProfile {
+): Promise<UserProfile> {
   const sets: string[] = [];
   const values: (string | null)[] = [];
+  let index = 1;
 
   if (updates.full_name !== undefined) {
-    sets.push("full_name = ?");
+    sets.push(`full_name = $${index++}`);
     values.push(updates.full_name);
   }
   if (updates.email !== undefined) {
-    sets.push("email = ?");
+    sets.push(`email = $${index++}`);
     values.push(updates.email);
   }
   if (updates.phone !== undefined) {
-    sets.push("phone = ?");
+    sets.push(`phone = $${index++}`);
     values.push(updates.phone);
   }
   if (updates.linkedin_url !== undefined) {
-    sets.push("linkedin_url = ?");
+    sets.push(`linkedin_url = $${index++}`);
     values.push(updates.linkedin_url);
   }
   if (updates.portfolio_url !== undefined) {
-    sets.push("portfolio_url = ?");
+    sets.push(`portfolio_url = $${index++}`);
     values.push(updates.portfolio_url);
   }
   if (updates.about_me !== undefined) {
-    sets.push("about_me = ?");
+    sets.push(`about_me = $${index++}`);
     values.push(updates.about_me);
   }
   if (updates.why_looking !== undefined) {
-    sets.push("why_looking = ?");
+    sets.push(`why_looking = $${index++}`);
     values.push(updates.why_looking);
   }
   if (updates.building_teams !== undefined) {
-    sets.push("building_teams = ?");
+    sets.push(`building_teams = $${index++}`);
     values.push(updates.building_teams);
   }
   if (updates.ai_shift !== undefined) {
-    sets.push("ai_shift = ?");
+    sets.push(`ai_shift = $${index++}`);
     values.push(updates.ai_shift);
   }
   if (updates.experience_json !== undefined) {
-    sets.push("experience_json = ?");
+    sets.push(`experience_json = $${index++}`);
     values.push(updates.experience_json);
   }
   if (updates.cover_letter_tone !== undefined) {
-    sets.push("cover_letter_tone = ?");
+    sets.push(`cover_letter_tone = $${index++}`);
     values.push(updates.cover_letter_tone);
   }
   if (updates.cover_letter_structure !== undefined) {
-    sets.push("cover_letter_structure = ?");
+    sets.push(`cover_letter_structure = $${index++}`);
     values.push(updates.cover_letter_structure);
   }
   if (updates.resume_text !== undefined) {
-    sets.push("resume_text = ?");
+    sets.push(`resume_text = $${index++}`);
     values.push(updates.resume_text);
   }
   if (updates.resume_file_path !== undefined) {
-    sets.push("resume_file_path = ?");
+    sets.push(`resume_file_path = $${index++}`);
     values.push(updates.resume_file_path);
   }
   if (updates.google_calendar_refresh_token !== undefined) {
-    sets.push("google_calendar_refresh_token = ?");
+    sets.push(`google_calendar_refresh_token = $${index++}`);
     values.push(updates.google_calendar_refresh_token);
   }
   if (updates.google_calendar_id !== undefined) {
-    sets.push("google_calendar_id = ?");
+    sets.push(`google_calendar_id = $${index++}`);
     values.push(updates.google_calendar_id);
   }
 
   if (sets.length > 0) {
-    sets.push("updated_at = datetime('now')");
+    sets.push("updated_at = now()::text");
     values.push(id);
-    db.run(`UPDATE user_profile SET ${sets.join(", ")} WHERE id = ?`, values);
+    const query = `UPDATE user_profile SET ${sets.join(", ")} WHERE id = $${index} RETURNING *`;
+    const rows = (await db.unsafe(query, values)) as UserProfile[];
+    return rows[0]!;
   }
 
-  return getUserProfile(db)!;
+  const rows = (await db.unsafe("SELECT * FROM user_profile WHERE id = $1", [id])) as UserProfile[];
+  return rows[0]!;
 }

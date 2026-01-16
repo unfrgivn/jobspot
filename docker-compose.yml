@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: jobspot-postgres
+    environment:
+      POSTGRES_DB: jobspot
+      POSTGRES_USER: jobspot
+      POSTGRES_PASSWORD: jobspot
+    ports:
+      - "5022:5432"
+    volumes:
+      - jobspot_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  jobspot_postgres_data:

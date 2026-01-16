@@ -27,7 +27,7 @@ Track applications, generate tailored cover letters, and prepare for interviewsâ
 | **AI Cover Letters**  | Uses Gemini 2.0 to craft tailored letters based on your resume + JD     |
 | **PDF Generation**    | Renders professional PDFs via LaTeX (no more Word formatting hell)      |
 | **Company Research**  | Auto-fetches company details to prep you for interviews                 |
-| **Local First**       | Your data stays on your machine (TOML/JSON storage)                     |
+| **Local First**       | Your data stays in Postgres (local Docker or Supabase)                  |
 
 ---
 
@@ -56,6 +56,7 @@ bun run src/index.ts apply <role-id>
 ### Prerequisites
 
 - **Bun**: This project runs on [Bun](https://bun.sh).
+- **Postgres**: Run locally via Docker or connect to Supabase.
 - **XeLaTeX**: Required for rendering PDFs (usually part of TeX Live or MiKTeX).
 - **LLM API Key**: Supports Gemini, OpenAI, and Anthropic.
 
@@ -74,14 +75,28 @@ bun run src/index.ts apply <role-id>
    bun install
    ```
 
-3. **Configure Environment:**
-   Create a `.env` file with the API key for your provider:
+3. **Start Postgres (local dev):**
+
    ```bash
+   docker compose up -d
+   ```
+
+4. **Configure Environment:**
+   Create a `.env` file with the API key for your provider and database URL:
+   ```bash
+   DATABASE_URL=postgresql://jobspot:jobspot@localhost:5432/jobspot
    GEMINI_API_KEY=your_gemini_key
    # OPENAI_API_KEY=your_openai_key
    # ANTHROPIC_API_KEY=your_anthropic_key
    # GOOGLE_API_KEY=legacy_gemini_key
    ```
+
+---
+
+### Vercel + Supabase
+
+- Set `DATABASE_URL` in Vercel to your Supabase pooled connection string (port 6543).
+- For local development, use `docker compose up -d` and keep the same `DATABASE_URL` format.
 
 ---
 

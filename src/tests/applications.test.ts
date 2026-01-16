@@ -1,5 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { Database } from "bun:sqlite";
+import postgres from "postgres";
 import {
   getAllApplications,
   getApplicationByRoleId,
@@ -7,79 +6,55 @@ import {
   updateApplication,
   type ApplicationStatus,
 } from "../db/applications";
+import { runMigrations, type DbClient } from "../db";
+
+const testDbUrl = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL;
+
+if (!testDbUrl) {
+  throw new Error("TEST_DATABASE_URL or DATABASE_URL must be set to run tests");
+}
 
 describe("applications database operations", () => {
-  let db: Database;
+  let db: DbClient;
 
-  beforeEach(() => {
-    db = new Database(":memory:");
-    
-    db.run(`
-      CREATE TABLE companies (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        website TEXT,
-        logo_url TEXT,
-        description TEXT,
-        industry TEXT,
-        size TEXT,
-        location TEXT,
-        culture_notes TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
-      )
-    `);
-
-    db.run(`
-      CREATE TABLE roles (
-        id TEXT PRIMARY KEY,
-        company_id TEXT NOT NULL REFERENCES companies(id),
-        title TEXT NOT NULL,
-        description TEXT,
-        requirements TEXT,
-        location TEXT,
-        compensation_range TEXT,
-        job_url TEXT,
-        notes TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
-      )
-    `);
-
-    db.run(`
-      CREATE TABLE applications (
-        id TEXT PRIMARY KEY,
-        role_id TEXT NOT NULL REFERENCES roles(id),
-        status TEXT NOT NULL DEFAULT 'wishlist',
-        applied_at TEXT,
-        via TEXT,
-        next_followup_at TEXT,
-        notes TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
-      )
-    `);
-
-    db.run(`INSERT INTO companies (id, name) VALUES ('comp-1', 'Test Company')`);
-    db.run(`INSERT INTO roles (id, company_id, title) VALUES ('role-1', 'comp-1', 'Software Engineer')`);
-    db.run(`INSERT INTO roles (id, company_id, title) VALUES ('role-2', 'comp-1', 'Product Manager')`);
+  beforeAll(async () => {
+    db = postgres(testDbUrl, { max: 1 });
+    await runMigrations(db);
   });
 
-  afterEach(() => {
-    db.close();
+  afterAll(async () => {
+    await db.end({ timeout: 5 });
+  });
+
+  beforeEach(async () => {
+    await db.unsafe(
+      "TRUNCATE TABLE application_questions, role_research, candidate_context, events, tasks, artifacts, interviews, contacts, applications, roles, companies, user_profile RESTART IDENTITY CASCADE"
+    );
+
+    await db.unsafe("INSERT INTO companies (id, name) VALUES ($1, $2)", ["comp-1", "Test Company"]);
+    await db.unsafe("INSERT INTO roles (id, company_id, title) VALUES ($1, $2, $3)", [
+      "role-1",
+      "comp-1",
+      "Software Engineer",
+    ]);
+    await db.unsafe("INSERT INTO roles (id, company_id, title) VALUES ($1, $2, $3)", [
+      "role-2",
+      "comp-1",
+      "Product Manager",
+    ]);
   });
 
   describe("createApplication", () => {
-    test("creates application with default status", () => {
-      const app = createApplication(db, { role_id: "role-1" });
+    test("creates application with default status", async () => {
+      const app = await createApplication(db, { role_id: "role-1" });
 
       expect(app.id).toBeDefined();
       expect(app.role_id).toBe("role-1");
       expect(app.status).toBe("wishlist");
     });
 
-    test("creates application with custom status", () => {
-      const app = createApplication(db, { 
+    test("creates application with custom status", async () => {
+      const app = await createApplication(db, { 
         role_id: "role-1",
         status: "applied",
       });
@@ -87,8 +62,8 @@ describe("applications database operations", () => {
       expect(app.status).toBe("applied");
     });
 
-    test("creates application with notes and via", () => {
-      const app = createApplication(db, {
+    test("creates application with notes and via", async () => {
+      const app = await createApplication(db, {
         role_id: "role-1",
         notes: "Referred by John",
         via: "LinkedIn",
@@ -100,63 +75,63 @@ describe("applications database operations", () => {
   });
 
   describe("getApplicationByRoleId", () => {
-    test("returns application when found", () => {
-      createApplication(db, { role_id: "role-1" });
+    test("returns application when found", async () => {
+      await createApplication(db, { role_id: "role-1" });
 
-      const found = getApplicationByRoleId(db, "role-1");
+      const found = await getApplicationByRoleId(db, "role-1");
 
       expect(found).not.toBeNull();
       expect(found?.role_id).toBe("role-1");
     });
 
-    test("returns null when not found", () => {
-      const found = getApplicationByRoleId(db, "nonexistent");
+    test("returns null when not found", async () => {
+      const found = await getApplicationByRoleId(db, "nonexistent");
       expect(found).toBeNull();
     });
   });
 
   describe("updateApplication", () => {
-    test("updates status correctly", () => {
-      const app = createApplication(db, { role_id: "role-1" });
+    test("updates status correctly", async () => {
+      const app = await createApplication(db, { role_id: "role-1" });
 
-      updateApplication(db, app.id, { status: "interviewing" });
+      await updateApplication(db, app.id, { status: "interviewing" });
 
-      const updated = getApplicationByRoleId(db, "role-1");
+      const updated = await getApplicationByRoleId(db, "role-1");
       expect(updated?.status).toBe("interviewing");
     });
 
-    test("handles all valid statuses", () => {
+    test("handles all valid statuses", async () => {
       const statuses: ApplicationStatus[] = ["wishlist", "applied", "interviewing", "offer", "rejected", "withdrawn"];
       
-      const app = createApplication(db, { role_id: "role-1" });
+      const app = await createApplication(db, { role_id: "role-1" });
       
       for (const status of statuses) {
-        expect(() => updateApplication(db, app.id, { status })).not.toThrow();
+        await expect(updateApplication(db, app.id, { status })).resolves.toBeDefined();
       }
     });
 
-    test("updates notes field", () => {
-      const app = createApplication(db, { role_id: "role-1" });
+    test("updates notes field", async () => {
+      const app = await createApplication(db, { role_id: "role-1" });
 
-      updateApplication(db, app.id, { notes: "Follow up next week" });
+      await updateApplication(db, app.id, { notes: "Follow up next week" });
 
-      const updated = getApplicationByRoleId(db, "role-1");
+      const updated = await getApplicationByRoleId(db, "role-1");
       expect(updated?.notes).toBe("Follow up next week");
     });
   });
 
   describe("getAllApplications", () => {
-    test("returns all applications with role and company data", () => {
-      createApplication(db, { role_id: "role-1" });
-      createApplication(db, { role_id: "role-2" });
+    test("returns all applications with role and company data", async () => {
+      await createApplication(db, { role_id: "role-1" });
+      await createApplication(db, { role_id: "role-2" });
 
-      const apps = getAllApplications(db);
+      const apps = await getAllApplications(db);
 
       expect(apps.length).toBeGreaterThanOrEqual(2);
     });
 
-    test("returns empty array when no applications", () => {
-      const apps = getAllApplications(db);
+    test("returns empty array when no applications", async () => {
+      const apps = await getAllApplications(db);
       expect(apps).toHaveLength(0);
     });
   });

@@ -1,8 +1,12 @@
 import { Hono } from "hono";
+import { readFile } from "fs/promises";
+import { serve } from "@hono/node-server";
 import { cors } from "hono/cors";
-import { serveStatic } from "hono/bun";
+import { serveStatic } from "@hono/node-server/serve-static";
 import { streamSSE } from "hono/streaming";
-import { findRoot, dbPath } from "./workspace";
+import { getCookie, setCookie, deleteCookie } from "hono/cookie";
+import { randomUUID } from "crypto";
+import { findRoot } from "./workspace";
 import { getDb, runMigrations } from "./db";
 import {
   getAllCompanies,
@@ -77,6 +81,7 @@ import { initWorkspace } from "./commands/init";
 import { runDoctor } from "./commands/doctor";
 import { generateCoverLetterStream } from "./llm/gemini";
 import { generateCompanyResearch } from "./llm/research";
+import { researchCompany } from "./llm/company-research";
 import { generateJson, generateText } from "./llm/provider-client";
 import {
   loadConfig,
@@ -91,24 +96,36 @@ import {
   updateUserProfile,
   initUserProfileTable,
 } from "./db/user_profile";
+import type { User } from "./db/users";
+import { getOrCreateUserFromGoogleProfile, getUserById } from "./db/users";
+import { createSession, deleteExpiredSessions, deleteSession, getSessionById } from "./db/sessions";
+import {
+  exchangeCodeForGoogleProfile,
+  generateGoogleAuthUrl,
+  isGoogleAuthConfigured,
+} from "./integrations/google-auth";
 
-const app = new Hono();
+type AppVariables = {
+  authUser?: User;
+};
+
+const app = new Hono<{ Variables: AppVariables }>();
 
 let migrationsChecked = false;
 
-function ensureMigrations(root: string): void {
+async function ensureMigrations(): Promise<void> {
   if (migrationsChecked) {
     return;
   }
 
-  runMigrations(getDb(dbPath(root)));
+  await runMigrations(getDb());
   migrationsChecked = true;
 }
 
-function ensureWorkspaceRoot(): string {
+async function ensureWorkspaceRoot(): Promise<string> {
   const root = findRoot(undefined, { throwOnMissing: false });
   if (root) {
-    ensureMigrations(root);
+    await ensureMigrations();
     return root;
   }
 
@@ -116,12 +133,13 @@ function ensureWorkspaceRoot(): string {
 
   const initializedRoot = findRoot(undefined, { throwOnMissing: false });
   if (initializedRoot) {
-    ensureMigrations(initializedRoot);
+    await ensureMigrations();
     return initializedRoot;
   }
 
   throw new Error("No jobsearch workspace found. Run `jobsearch init` first.");
 }
+
 
 function resolveLlmCredentials(
   root: string
@@ -153,7 +171,113 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+const SESSION_COOKIE_NAME = "jobsearch_session";
+const SESSION_TTL_DAYS = 30;
+const AUTH_REDIRECT_COOKIE_NAME = "auth_redirect";
+
+function getSessionExpiry(): string {
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + SESSION_TTL_DAYS);
+  return expiresAt.toISOString();
+}
+
+function setSessionCookie(responseContext: Parameters<typeof setCookie>[0], sessionId: string, expiresAt: string) {
+  setCookie(responseContext, SESSION_COOKIE_NAME, sessionId, {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    expires: new Date(expiresAt),
+  });
+}
+
+function clearSessionCookie(responseContext: Parameters<typeof deleteCookie>[0]) {
+  deleteCookie(responseContext, SESSION_COOKIE_NAME, { path: "/" });
+}
+
+function resolveRedirectOrigin(candidate?: string | null): string | null {
+  if (!candidate) {
+    return null;
+  }
+
+  try {
+    const url = new URL(candidate);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return null;
+    }
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+async function getAuthenticatedUser(responseContext: Parameters<typeof getCookie>[0]): Promise<User | null> {
+  const sessionId = getCookie(responseContext, SESSION_COOKIE_NAME);
+  if (!sessionId) {
+    return null;
+  }
+
+  const db = getDb();
+  const session = await getSessionById(db, sessionId);
+  if (!session) {
+    return null;
+  }
+
+  if (new Date(session.expires_at) <= new Date()) {
+    await deleteSession(db, session.id);
+    return null;
+  }
+
+  const user = await getUserById(db, session.user_id);
+  if (!user) {
+    await deleteSession(db, session.id);
+    return null;
+  }
+
+  return user;
+}
+
+async function claimUnownedData(db: ReturnType<typeof getDb>, userId: string): Promise<void> {
+  const tables = [
+    "companies",
+    "roles",
+    "applications",
+    "contacts",
+    "interviews",
+    "artifacts",
+    "tasks",
+    "events",
+    "role_research",
+    "application_questions",
+    "user_profile",
+  ];
+
+  for (const table of tables) {
+    await db.unsafe(`UPDATE ${table} SET user_id = $1 WHERE user_id IS NULL`, [userId]);
+  }
+}
+
 app.use("*", cors());
+
+app.use("/api/*", async (c, next) => {
+  const path = c.req.path;
+  if (path === "/api/health" || path === "/api/doctor" || path.startsWith("/api/auth/")) {
+    await next();
+    return;
+  }
+
+  await ensureWorkspaceRoot();
+  await deleteExpiredSessions(getDb());
+
+  const user = await getAuthenticatedUser(c);
+  if (!user) {
+    clearSessionCookie(c);
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  c.set("authUser", user);
+  await next();
+});
 
 app.get("/api/health", (c) => c.json({ status: "ok" }));
 
@@ -168,55 +292,180 @@ app.get("/api/doctor", async (c) => {
   return c.json({ checks, allOk });
 });
 
+app.get("/api/auth/session", async (c) => {
+  await ensureWorkspaceRoot();
+  const user = await getAuthenticatedUser(c);
+  if (!user) {
+    return c.json({ authenticated: false });
+  }
+
+  return c.json({
+    authenticated: true,
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      avatar_url: user.avatar_url,
+    },
+  });
+});
+
+app.get("/api/auth/google/authorize", async (c) => {
+  await ensureWorkspaceRoot();
+  const secrets = loadSecrets();
+  if (!isGoogleAuthConfigured(secrets)) {
+    return c.json({ error: "Google OAuth not configured" }, 400);
+  }
+
+  const state = randomUUID();
+  setCookie(c, "google_oauth_state", state, {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 60 * 10,
+  });
+
+  const redirectOrigin =
+    resolveRedirectOrigin(c.req.query("redirect")) ??
+    resolveRedirectOrigin(c.req.header("origin")) ??
+    resolveRedirectOrigin(c.req.header("referer"));
+
+  if (redirectOrigin) {
+    setCookie(c, AUTH_REDIRECT_COOKIE_NAME, redirectOrigin, {
+      httpOnly: true,
+      sameSite: "Lax",
+      secure: process.env.NODE_ENV === "production",
+      path: "/",
+      maxAge: 60 * 10,
+    });
+  }
+
+  const url = generateGoogleAuthUrl(secrets, state);
+  return c.json({ url });
+});
+
+app.get("/api/auth/google/callback", async (c) => {
+  const code = c.req.query("code");
+  const state = c.req.query("state");
+  const expectedState = getCookie(c, "google_oauth_state");
+
+  if (!code) {
+    return c.html("<html><body><h1>Error</h1><p>No authorization code received.</p></body></html>");
+  }
+
+  if (!state || !expectedState || state !== expectedState) {
+    return c.html("<html><body><h1>Error</h1><p>Invalid OAuth state.</p></body></html>");
+  }
+
+  deleteCookie(c, "google_oauth_state", { path: "/" });
+
+  const redirectOriginCookie = getCookie(c, AUTH_REDIRECT_COOKIE_NAME);
+  if (redirectOriginCookie) {
+    deleteCookie(c, AUTH_REDIRECT_COOKIE_NAME, { path: "/" });
+  }
+  const redirectOrigin = resolveRedirectOrigin(redirectOriginCookie);
+
+  await ensureWorkspaceRoot();
+  const db = getDb();
+  const secrets = loadSecrets();
+
+  if (!isGoogleAuthConfigured(secrets)) {
+    return c.html("<html><body><h1>Error</h1><p>Google OAuth not configured.</p></body></html>");
+  }
+
+  try {
+    const profile = await exchangeCodeForGoogleProfile(secrets, code);
+    const user = await getOrCreateUserFromGoogleProfile(db, profile);
+
+    await claimUnownedData(db, user.id);
+
+    const existingProfile = await getUserProfile(db, user.id);
+    if (!existingProfile) {
+      await createUserProfile(db, user.id, {
+        full_name: user.name ?? null,
+        email: user.email ?? null,
+      });
+    }
+
+    const expiresAt = getSessionExpiry();
+    const session = await createSession(db, user.id, expiresAt);
+    setSessionCookie(c, session.id, expiresAt);
+
+    const redirectTarget = redirectOrigin ? `${redirectOrigin}/dashboard` : "/";
+    return c.redirect(redirectTarget);
+  } catch (error) {
+    console.error("OAuth callback error:", error);
+    return c.html(`<html><body><h1>Error</h1><p>${error}</p></body></html>`);
+  }
+});
+
+app.post("/api/auth/logout", async (c) => {
+  await ensureWorkspaceRoot();
+  const db = getDb();
+  const sessionId = getCookie(c, SESSION_COOKIE_NAME);
+  if (sessionId) {
+    await deleteSession(db, sessionId);
+  }
+  clearSessionCookie(c);
+  return c.json({ success: true });
+});
+
 app.get("/api/companies", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
-  const companies = getAllCompanies(db);
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const companies = await getAllCompanies(db, authUser.id);
   return c.json(companies);
 });
 
 app.get("/api/companies/:id", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
-  const company = getCompanyById(db, c.req.param("id"));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const company = await getCompanyById(db, authUser.id, c.req.param("id"));
   if (!company) return c.json({ error: "Company not found" }, 404);
   return c.json(company);
 });
 
 app.post("/api/companies", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
   const body = await c.req.json();
-  const company = createCompany(db, body);
+  const company = await createCompany(db, authUser.id, body);
   return c.json(company, 201);
 });
 
 app.get("/api/roles", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
-  const roles = getAllRoles(db);
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const roles = await getAllRoles(db, authUser.id);
   return c.json(roles);
 });
 
 app.get("/api/roles/:id", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
-  const role = getRoleWithDetails(db, c.req.param("id"));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const role = await getRoleWithDetails(db, authUser.id, c.req.param("id"));
   if (!role) return c.json({ error: "Role not found" }, 404);
   return c.json(role);
 });
 
 app.post("/api/roles", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
   try {
     const body = await c.req.json<AddRoleOptions>();
-    const role = await addRole(body);
+    const role = await addRole(authUser.id, body);
     return c.json(role, 201);
   } catch (error) {
     if (error instanceof Error && error.message === "Role already added") {
@@ -229,39 +478,46 @@ app.post("/api/roles", async (c) => {
 });
 
 app.put("/api/roles/:id", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
   const body = await c.req.json();
-  const role = updateRole(db, c.req.param("id"), body);
+  const role = await updateRole(db, authUser.id, c.req.param("id"), body);
   return c.json(role);
 });
 
 app.put("/api/roles/:id/jd", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
   const body = await c.req.json<{ jd_text: string }>();
-  const role = updateRoleJd(db, c.req.param("id"), body.jd_text);
+  const role = await updateRoleJd(db, authUser.id, c.req.param("id"), body.jd_text);
   return c.json(role);
 });
 
 app.post("/api/roles/:id/applications", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const db = getDb(dbPath(root));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
   const roleId = c.req.param("id");
   const body = await c.req.json<{ status?: string }>();
-  
-  const existing = db.prepare("SELECT id, status FROM applications WHERE role_id = ?").get(roleId) as { id: string; status: string } | undefined;
+
+  const existingRows = (await db.unsafe(
+    "SELECT id, status FROM applications WHERE user_id = $1 AND role_id = $2",
+    [authUser.id, roleId]
+  )) as Array<{ id: string; status: string }>;
+  const existing = existingRows[0];
   if (existing) {
     return c.json(existing);
   }
-  
+
   try {
     const status = (body.status || "wishlist") as "wishlist" | "applied" | "interviewing" | "offer" | "rejected" | "withdrawn";
-    const application = createApplication(db, { role_id: roleId, status });
+    const application = await createApplication(db, authUser.id, { role_id: roleId, status });
     return c.json(application);
   } catch (error) {
     console.error("Failed to create application:", error);
@@ -271,8 +527,11 @@ app.post("/api/roles/:id/applications", async (c) => {
 
 app.post("/api/roles/:id/refresh", async (c) => {
   try {
+    await ensureWorkspaceRoot();
+    const authUser = c.get("authUser");
+    if (!authUser) return c.json({ error: "Unauthorized" }, 401);
     const roleId = c.req.param("id");
-    const result = await refreshRole(roleId);
+    const result = await refreshRole(authUser.id, roleId);
     return c.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to refresh role";
@@ -281,19 +540,20 @@ app.post("/api/roles/:id/refresh", async (c) => {
 });
 
 app.post("/api/roles/:id/generate-linkedin-message", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const db = getDb(dbPath(root));
+  const root = await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
   const roleId = c.req.param("id");
-  const role = getRoleWithDetails(db, roleId);
-  
+  const role = await getRoleWithDetails(db, authUser.id, roleId);
+
   if (!role) return c.json({ error: "Role not found" }, 404);
-  
-  const profile = getUserProfile(db);
+
+  const profile = await getUserProfile(db, authUser.id);
   if (!profile) return c.json({ error: "Profile not found. Please complete your profile in Settings." }, 400);
   
-  const candidateContext = getCandidateContext(db, profile.id);
+  const candidateContext = await getCandidateContext(db, profile.id);
   const { apiKey, error, provider, model } = resolveLlmCredentials(root);
   
   if (!apiKey || !provider || !model) {
@@ -386,7 +646,7 @@ OUTPUT FORMAT (exactly this JSON):
     }
 
     const storedMessage = JSON.stringify(parsedMessage);
-    const updatedRole = updateRole(db, roleId, { linkedin_message: storedMessage });
+    const updatedRole = await updateRole(db, authUser.id, roleId, { linkedin_message: storedMessage });
 
     return c.json({ subject: parsedMessage.subject, message: parsedMessage.message, role: updatedRole });
   } catch (error) {
@@ -397,16 +657,17 @@ OUTPUT FORMAT (exactly this JSON):
 
 app.delete("/api/roles/:id", async (c) => {
   try {
-    const root = ensureWorkspaceRoot();
-    if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-    
+    await ensureWorkspaceRoot();
+    const authUser = c.get("authUser");
+    if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
     const roleId = c.req.param("id");
-    const db = getDb(dbPath(root));
-    const role = getRoleById(db, roleId);
-    
+    const db = getDb();
+    const role = await getRoleById(db, authUser.id, roleId);
+
     if (!role) return c.json({ error: "Role not found" }, 404);
-    
-    deleteRole(db, roleId);
+
+    await deleteRole(db, authUser.id, roleId);
     return c.json({ success: true, message: "Role deleted successfully" });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to delete role";
@@ -415,19 +676,20 @@ app.delete("/api/roles/:id", async (c) => {
 });
 
 app.post("/api/pipeline/refresh", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const db = getDb(dbPath(root));
-  const roles = db
-    .query<{ id: string; job_url: string | null }, []>(
-      `SELECT r.id, r.job_url 
-       FROM roles r
-       JOIN applications a ON a.role_id = r.id
-       WHERE a.status IN ('wishlist', 'applied', 'interviewing', 'offer')
-       AND r.job_url IS NOT NULL`
-    )
-    .all();
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
+  const roles = (await db.unsafe(
+    `SELECT r.id, r.job_url 
+     FROM roles r
+     JOIN applications a ON a.role_id = r.id
+     WHERE a.user_id = $1 AND r.user_id = $1
+     AND a.status IN ('wishlist', 'applied', 'interviewing', 'offer')
+     AND r.job_url IS NOT NULL`,
+    [authUser.id]
+  )) as Array<{ id: string; job_url: string | null }>;
 
   const results = {
     total: roles.length,
@@ -438,7 +700,8 @@ app.post("/api/pipeline/refresh", async (c) => {
 
   for (const role of roles) {
     try {
-      const result = await refreshRole(role.id);
+        const result = await refreshRole(authUser.id, role.id);
+
       if (result.updated) {
         results.updated++;
       } else {
@@ -454,101 +717,114 @@ app.post("/api/pipeline/refresh", async (c) => {
 });
 
 app.get("/api/stats", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
-  const stats = getPipelineStats(db);
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const stats = await getPipelineStats(db, authUser.id);
   return c.json(stats);
 });
 
 app.get("/api/roles/:id/artifacts", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
   const roleId = c.req.param("id");
-  const application = getApplicationByRoleId(db, roleId);
+  const application = await getApplicationByRoleId(db, authUser.id, roleId);
   if (!application) return c.json([]);
-  const artifacts = db
-    .query<{ id: string; kind: string; path: string; created_at: string }, [string]>(
-      "SELECT id, kind, path, created_at FROM artifacts WHERE application_id = ?"
-    )
-    .all(application.id);
+  const artifacts = (await db.unsafe(
+    "SELECT id, kind, path, created_at FROM artifacts WHERE user_id = $1 AND application_id = $2",
+    [authUser.id, application.id]
+  )) as Array<{ id: string; kind: string; path: string; created_at: string }>;
   return c.json(artifacts);
 });
 
 app.get("/api/artifacts/:id", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
-  const artifact = db
-    .query<{ path: string }, [string]>("SELECT path FROM artifacts WHERE id = ?")
-    .get(c.req.param("id"));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const artifactRows = (await db.unsafe(
+    "SELECT path FROM artifacts WHERE user_id = $1 AND id = $2",
+    [authUser.id, c.req.param("id")]
+  )) as Array<{ path: string }>;
+  const artifact = artifactRows[0];
   if (!artifact) return c.json({ error: "Artifact not found" }, 404);
-  const file = Bun.file(artifact.path);
-  if (!(await file.exists())) return c.json({ error: "File not found" }, 404);
-  return new Response(file);
+  try {
+    const buffer = await readFile(artifact.path);
+    return new Response(buffer);
+  } catch {
+    return c.json({ error: "File not found" }, 404);
+  }
 });
 
 app.get("/api/applications", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
   const status = c.req.query("status");
   const applications = status
-    ? getApplicationsByStatus(db, status)
-    : getAllApplications(db);
+    ? await getApplicationsByStatus(db, authUser.id, status)
+    : await getAllApplications(db, authUser.id);
   return c.json(applications);
 });
 
 app.get("/api/applications/stats", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
-  const stats = getPipelineStats(db);
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const stats = await getPipelineStats(db, authUser.id);
   return c.json(stats);
 });
 
 app.get("/api/applications/:id", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
-  const application = getApplicationById(db, c.req.param("id"));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const application = await getApplicationById(db, authUser.id, c.req.param("id"));
   if (!application) return c.json({ error: "Application not found" }, 404);
   return c.json(application);
 });
 
 app.put("/api/applications/:id", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
   const body = await c.req.json();
-  const application = updateApplication(db, c.req.param("id"), body);
+  const application = await updateApplication(db, authUser.id, c.req.param("id"), body);
   return c.json(application);
 });
 
 app.post("/api/applications/:id/apply", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
 
   const applicationId = c.req.param("id");
-  const db = getDb(dbPath(root));
-  const application = getApplicationById(db, applicationId);
+  const db = getDb();
+  const application = await getApplicationById(db, authUser.id, applicationId);
   if (!application) return c.json({ error: "Application not found" }, 404);
 
-  const result = await applyToRole(application.role_id);
+  const result = await applyToRole(authUser.id, application.role_id);
   return c.json(result);
 });
 
 app.post("/api/stream/cover-letter/:roleId", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
+  const root = await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
 
   const roleId = c.req.param("roleId");
   const body = await c.req.json().catch(() => ({}));
   const additionalContext = body.additionalContext || "";
 
-  const db = getDb(dbPath(root));
-  const role = getRoleById(db, roleId);
+  const db = getDb();
+  const role = await getRoleWithDetails(db, authUser.id, roleId);
   if (!role) return c.json({ error: "Role not found" }, 404);
 
   const { apiKey, error, provider, model } = resolveLlmCredentials(root);
@@ -556,422 +832,13 @@ app.post("/api/stream/cover-letter/:roleId", async (c) => {
     return c.json({ error: error ?? "LLM API key not configured" }, 500);
   }
 
-  const userProfile = getUserProfile(db);
+  const userProfile = await getUserProfile(db, authUser.id);
   if (!userProfile) return c.json({ error: "No user profile found" }, 404);
 
-  const candidateContext = getCandidateContext(db, userProfile.id);
-
-  const contextToUse = candidateContext?.full_context || `
-Name: ${userProfile.full_name || 'Unknown'}
-About: ${userProfile.about_me || 'No about info'}
-Resume: ${userProfile.resume_text || 'No resume uploaded'}
-  `.trim();
-
-  const profile = {
-    candidateContext: contextToUse,
-    apiKey,
-    model,
-    provider,
-  };
-
-  return streamSSE(c, async (stream) => {
-    try {
-      const generator = generateCoverLetterStream(profile, role, additionalContext);
-      for await (const chunk of generator) {
-        await stream.writeSSE({ data: chunk });
-      }
-      await stream.writeSSE({ event: "done", data: "" });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error";
-      await stream.writeSSE({ event: "error", data: message });
-    }
-  });
-});
-
-app.get("/api/roles/:id/research", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-
-  const roleId = c.req.param("id");
-  const db = getDb(dbPath(root));
-  const research = getResearchByRoleId(db, roleId);
-  return c.json(research ?? null);
-});
-
-app.post("/api/stream/research/:roleId", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-
-  const roleId = c.req.param("roleId");
-  const db = getDb(dbPath(root));
-
-  const roleWithDetails = getRoleWithDetails(db, roleId);
-  if (!roleWithDetails) return c.json({ error: "Role not found" }, 404);
-
-  const { apiKey, error, provider, model } = resolveLlmCredentials(root);
-  if (!apiKey || !provider || !model) {
-    return c.json({ error: error ?? "LLM API key not configured" }, 500);
-  }
-
-  const profile = getUserProfile(db);
-  if (!profile) return c.json({ error: "User profile not found" }, 404);
-
-  const candidateContext = getCandidateContext(db, profile.id);
-
-  const contextToUse = candidateContext?.full_context || `
-CANDIDATE PROFILE:
-Name: ${profile.full_name}
-Resume: ${profile.resume_text?.slice(0, 3000) || 'Not provided'}
-About: ${profile.about_me || 'Not provided'}
-  `.trim();
-
-  void getOrCreateResearch(db, roleId);
-
-  return streamSSE(c, async (stream) => {
-    try {
-      const generator = generateCompanyResearch({
-        provider,
-        apiKey,
-        model,
-        companyName: roleWithDetails.company_name,
-        companyWebsite: roleWithDetails.company_website,
-        companyDescription: roleWithDetails.company_description,
-        companyHeadquarters: roleWithDetails.company_headquarters,
-        roleTitle: roleWithDetails.title,
-        jobDescription: roleWithDetails.jd_text ?? "",
-        candidateContext: contextToUse,
-      });
-
-      for await (const { section, content } of generator) {
-        updateResearch(db, roleId, { [section]: content });
-        await stream.writeSSE({ event: section, data: content });
-      }
-
-      await stream.writeSSE({ event: "done", data: "" });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error";
-      await stream.writeSSE({ event: "error", data: message });
-    }
-  });
-});
-
-app.get("/api/tasks", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
-  const pending = c.req.query("pending") === "true";
-  const tasks = pending ? getPendingTasks(db) : getAllTasks(db);
-  return c.json(tasks);
-});
-
-app.put("/api/tasks/:id", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
-  const body = await c.req.json();
-  const task = updateTask(db, c.req.param("id"), body);
-  return c.json(task);
-});
-
-app.post("/api/tasks", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
-  const body = await c.req.json();
-  const task = createTask(db, body);
-  return c.json(task);
-});
-
-app.get("/api/profile", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
-  initUserProfileTable(db);
-  const profile = getUserProfile(db);
-  return c.json(profile);
-});
-
-app.post("/api/profile", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
-  initUserProfileTable(db);
-  const body = await c.req.json();
-  const profile = createUserProfile(db, body);
-  return c.json(profile);
-});
-
-app.put("/api/profile/:id", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
-  const body = await c.req.json();
-  const profile = updateUserProfile(db, c.req.param("id"), body);
-  return c.json(profile);
-});
-
-app.post("/api/profile/:id/resume", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  const db = getDb(dbPath(root));
-
-  const body = await c.req.parseBody();
-  const file = body.resume as File;
-
-  if (!file) {
-    return c.json({ error: "No file uploaded" }, 400);
-  }
-
-  const arrayBuffer = await file.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-
-  let resumeText = "";
-
-  if (file.name.toLowerCase().endsWith(".pdf")) {
-    const { extractTextFromPDF } = await import("./lib/pdf-parser");
-    resumeText = await extractTextFromPDF(buffer);
-  } else {
-    resumeText = await file.text();
-  }
-
-  const llmCredentials = getOptionalLlmCredentials(root);
-  let parsedData: Record<string, unknown> = {};
-
-  if (llmCredentials?.apiKey) {
-    try {
-      const parsed = await generateJson({
-        provider: llmCredentials.provider,
-        apiKey: llmCredentials.apiKey,
-        model: llmCredentials.model,
-        prompt: `Parse this resume and extract structured data as JSON. Include: full_name, email, phone, linkedin_url, work_experience (array with company, title, start_date, end_date, highlights), education (array), skills (array). Return ONLY valid JSON, no markdown formatting.\n\nResume:\n${resumeText}`,
-        temperature: 0.1,
-        maxTokens: 2048,
-      });
-
-      if (isRecord(parsed)) {
-        parsedData = parsed;
-      }
-    } catch (error) {
-      console.error("Failed to parse resume with AI:", error);
-    }
-  }
-
-  const updates: Record<string, unknown> = {
-    resume_text: resumeText,
-    resume_file_path: file.name,
-  };
-
-  const fullName = typeof parsedData.full_name === "string" ? parsedData.full_name : undefined;
-  const email = typeof parsedData.email === "string" ? parsedData.email : undefined;
-  const phone = typeof parsedData.phone === "string" ? parsedData.phone : undefined;
-  const linkedinUrl = typeof parsedData.linkedin_url === "string" ? parsedData.linkedin_url : undefined;
-  const workExperience = Array.isArray(parsedData.work_experience) ? parsedData.work_experience : undefined;
-  const education = Array.isArray(parsedData.education) ? parsedData.education : undefined;
-  const skills = Array.isArray(parsedData.skills) ? parsedData.skills : undefined;
-
-  if (fullName) updates.full_name = fullName;
-  if (email) updates.email = email;
-  if (phone) updates.phone = phone;
-  if (linkedinUrl) updates.linkedin_url = linkedinUrl;
-  if (workExperience || education || skills) {
-    updates.experience_json = JSON.stringify({
-      work_experience: workExperience ?? [],
-      education: education ?? [],
-      skills: skills ?? []
-    });
-  }
-
-  const profile = updateUserProfile(db, c.req.param("id"), updates);
-
-  return c.json(profile);
-});
-
-app.post("/api/candidate-context/refresh", async (c) => {
-  try {
-    const root = ensureWorkspaceRoot();
-    if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-
-    const db = getDb(dbPath(root));
-    const { apiKey, error, provider, model } = resolveLlmCredentials(root);
-    if (!apiKey || !provider || !model) {
-      return c.json({ error: error ?? "LLM API key not configured" }, 500);
-    }
-
-    const profile = getUserProfile(db);
-    if (!profile) {
-      return c.json({ error: "No user profile found" }, 404);
-    }
-
-    let linkedinData = null;
-    let portfolioData = null;
-
-    if (profile.linkedin_url) {
-      try {
-        linkedinData = await scrapeLinkedInProfile(profile.linkedin_url);
-      } catch (error) {
-        console.error("Failed to scrape LinkedIn:", error);
-      }
-    }
-
-    if (profile.portfolio_url) {
-      try {
-        portfolioData = await scrapePortfolioSite(profile.portfolio_url);
-      } catch (error) {
-        console.error("Failed to scrape portfolio:", error);
-      }
-    }
-
-    const synthesized = await buildCandidateContext(
-      { profile, linkedinData, portfolioData },
-      { provider, apiKey, model }
-    );
-
-    const existingContext = getCandidateContext(db, profile.id);
-
-    const now = new Date().toISOString();
-    const contextData = {
-      ...synthesized,
-      linkedin_scraped_at: profile.linkedin_url ? now : null,
-      portfolio_scraped_at: profile.portfolio_url ? now : null,
-      resume_parsed_at: profile.resume_text ? now : null,
-    };
-
-    let candidateContext;
-    if (existingContext) {
-      candidateContext = updateCandidateContext(db, existingContext.id, contextData);
-    } else {
-      candidateContext = createCandidateContext(db, profile.id, contextData);
-    }
-
-    return c.json(candidateContext);
-  } catch (error) {
-    console.error("Failed to refresh candidate context:", error);
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return c.json({ error: message }, 500);
-  }
-});
-
-app.get("/api/candidate-context", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
   
-  const db = getDb(dbPath(root));
-  const profile = getUserProfile(db);
-  
-  if (!profile) {
-    return c.json({ error: "No user profile found" }, 404);
-  }
-  
-  const context = getCandidateContext(db, profile.id);
-  
-  if (!context) {
-    return c.json({ error: "No candidate context found. Please refresh to generate." }, 404);
-  }
-  
-  return c.json(context);
-});
+  const candidateContext = await getCandidateContext(db, userProfile.id);
+  const companyName = role.company_name || "Unknown Company";
 
-app.get("/api/applications/:id/interviews", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const db = getDb(dbPath(root));
-  const applicationId = c.req.param("id");
-  const interviews = getInterviewsByApplication(db, applicationId);
-  
-  return c.json(interviews);
-});
-
-app.post("/api/applications/:id/interviews", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const db = getDb(dbPath(root));
-  const applicationId = c.req.param("id");
-  const body = await c.req.json();
-  
-  const interview = createInterview(db, {
-    application_id: applicationId,
-    scheduled_at: body.scheduled_at,
-    interview_type: body.interview_type,
-    interviewer_name: body.interviewer_name,
-    interviewer_title: body.interviewer_title,
-    notes: body.notes,
-    outcome: body.outcome,
-    duration_minutes: body.duration_minutes,
-    location: body.location,
-    video_link: body.video_link,
-    google_calendar_event_id: body.google_calendar_event_id,
-  });
-  
-  return c.json(interview);
-});
-
-app.put("/api/interviews/:id", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const db = getDb(dbPath(root));
-  const interviewId = c.req.param("id");
-  const body = await c.req.json();
-  
-  const interview = updateInterview(db, interviewId, body);
-  
-  return c.json(interview);
-});
-
-app.delete("/api/interviews/:id", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const db = getDb(dbPath(root));
-  const interviewId = c.req.param("id");
-  
-  deleteInterview(db, interviewId);
-  
-  return c.json({ success: true });
-});
-
-app.get("/api/roles/:roleId/questions", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const db = getDb(dbPath(root));
-  const roleId = c.req.param("roleId");
-  const questions = getQuestionsByRoleId(db, roleId);
-  return c.json(questions);
-});
-
-app.post("/api/roles/:roleId/questions/generate", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const db = getDb(dbPath(root));
-  const roleId = c.req.param("roleId");
-  const body = await c.req.json<{ question: string }>();
-  
-  if (!body.question?.trim()) {
-    return c.json({ error: "Question is required" }, 400);
-  }
-  
-  const role = getRoleById(db, roleId);
-  if (!role) return c.json({ error: "Role not found" }, 404);
-  
-  const company = db.query<{ name: string }, [string]>(
-    "SELECT name FROM companies WHERE id = ?"
-  ).get(role.company_id);
-  const companyName = company?.name || 'Unknown Company';
-  
-  const userProfile = getUserProfile(db);
-  if (!userProfile) return c.json({ error: "No user profile found" }, 404);
-  
-  const candidateContext = getCandidateContext(db, userProfile.id);
-  const { apiKey, error, provider, model } = resolveLlmCredentials(root);
-  
-  if (!apiKey || !provider || !model) {
-    return c.json({ error: error ?? "LLM API key not configured" }, 500);
-  }
-  
   const contextToUse = candidateContext?.full_context || `
 Name: ${userProfile.full_name}
 About: ${userProfile.about_me}
@@ -1026,24 +893,25 @@ Return ONLY a JSON array with exactly 3 strings, no other text:
 });
 
 app.post("/api/roles/:roleId/questions", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const db = getDb(dbPath(root));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
   const roleId = c.req.param("roleId");
   const body = await c.req.json<{ question: string; generated_answer?: string; submitted_answer?: string }>();
-  
+
   if (!body.question?.trim()) {
     return c.json({ error: "Question is required" }, 400);
   }
-  
+
   try {
-    const question = createQuestion(db, roleId, body.question, body.generated_answer || null);
-    
+    const question = await createQuestion(db, authUser.id, roleId, body.question, body.generated_answer || null);
+
     if (body.submitted_answer) {
-      updateQuestion(db, question.id, { submitted_answer: body.submitted_answer });
+      await updateQuestion(db, authUser.id, question.id, { submitted_answer: body.submitted_answer });
     }
-    
+
     return c.json(question);
   } catch (error) {
     console.error("Failed to create question:", error);
@@ -1052,137 +920,70 @@ app.post("/api/roles/:roleId/questions", async (c) => {
 });
 
 app.put("/api/questions/:questionId", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const db = getDb(dbPath(root));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
   const questionId = c.req.param("questionId");
   const body = await c.req.json<{ generated_answer?: string; submitted_answer?: string }>();
-  
-  const updated = updateQuestion(db, questionId, body);
+
+  const updated = await updateQuestion(db, authUser.id, questionId, body);
   if (!updated) return c.json({ error: "Question not found" }, 404);
-  
+
   return c.json(updated);
 });
 
 app.delete("/api/questions/:questionId", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const db = getDb(dbPath(root));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
   const questionId = c.req.param("questionId");
-  
-  deleteQuestion(db, questionId);
+
+  await deleteQuestion(db, authUser.id, questionId);
   return c.json({ success: true });
 });
 
 app.get("/api/backup", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const dbFile = dbPath(root);
-  const file = Bun.file(dbFile);
-  
-  if (!await file.exists()) {
-    return c.json({ error: "Database file not found" }, 404);
-  }
-  
-  const buffer = await file.arrayBuffer();
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const filename = `jobsearch-backup-${timestamp}.sqlite`;
-  
-  return new Response(buffer, {
-    headers: {
-      "Content-Type": "application/x-sqlite3",
-      "Content-Disposition": `attachment; filename="${filename}"`,
-    },
-  });
+  await ensureWorkspaceRoot();
+  return c.json({ error: "Backup is not supported for Postgres. Use pg_dump." }, 501);
 });
 
 app.post("/api/restore", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const formData = await c.req.formData();
-  const file = formData.get("backup") as File | null;
-  
-  if (!file) {
-    return c.json({ error: "No backup file provided" }, 400);
-  }
-  
-  if (!file.name.endsWith(".sqlite")) {
-    return c.json({ error: "Invalid file type. Expected .sqlite file" }, 400);
-  }
-  
-  const buffer = await file.arrayBuffer();
-  
-  const header = new Uint8Array(buffer.slice(0, 16));
-  const sqliteHeader = "SQLite format 3\0";
-  const isValidSqlite = String.fromCharCode(...header) === sqliteHeader;
-  
-  if (!isValidSqlite) {
-    return c.json({ error: "Invalid SQLite database file" }, 400);
-  }
-  
-  const dbFile = dbPath(root);
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const backupPath = `${dbFile}.pre-restore-${timestamp}`;
-  
-  const existingDb = Bun.file(dbFile);
-  if (await existingDb.exists()) {
-    await Bun.write(backupPath, existingDb);
-  }
-  
-  await Bun.write(dbFile, buffer);
-  
-  return c.json({ 
-    success: true, 
-    message: "Database restored successfully",
-    previousBackup: backupPath 
-  });
+  await ensureWorkspaceRoot();
+  return c.json({ error: "Restore is not supported for Postgres. Use psql to restore." }, 501);
 });
-
-const port = process.env.PORT ? parseInt(process.env.PORT) : 3001;
-
-export default {
-  port,
-  fetch: app.fetch,
-  idleTimeout: 180, // 3 minutes timeout for long-running operations like research generation
-};
-
-console.log(`Server running at http://localhost:${port}`);
 
 app.post("/api/companies/:id/research", async (c) => {
   const { id } = c.req.param();
-  const root = ensureWorkspaceRoot();
-  const db = getDb(dbPath(root));
+  const root = await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
   const { apiKey, error, provider, model } = resolveLlmCredentials(root);
-  
+
   if (!apiKey || !provider || !model) {
     return c.json({ error: error ?? "LLM API key not configured" }, 500);
   }
 
-  const company = getCompanyById(db, id);
-  if (!company) return c.json({ error: "Company not found" }, 404);
+  const company = await getCompanyById(db, authUser.id, id);
+  if (!company) {
+    return c.json({ error: "Company not found" }, 404);
+  }
 
-  const { researchCompany } = await import("./llm/company-research");
   const result = await researchCompany(provider, apiKey, model, company.name);
-  
-  if (!result) return c.json({ error: "Failed to research company" }, 500);
 
-  const fundingStatus = result.funding_status.type 
-    ? JSON.stringify(result.funding_status)
-    : null;
-  
-  const industry = result.industry.primary
-    ? JSON.stringify(result.industry)
-    : null;
-  
-  const companySize = result.company_size.employees_estimate
-    ? JSON.stringify(result.company_size)
-    : null;
+  if (!result) {
+    return c.json({ error: "Failed to research company" }, 500);
+  }
 
-  const updated = updateCompany(db, id, {
+  const fundingStatus = result.funding_status.type ? JSON.stringify(result.funding_status) : null;
+  const industry = result.industry.primary ? JSON.stringify(result.industry) : null;
+  const companySize = result.company_size.employees_estimate ? JSON.stringify(result.company_size) : null;
+
+  const updated = await updateCompany(db, authUser.id, id, {
     website: result.website || company.website || undefined,
     headquarters: result.headquarters.city && result.headquarters.country 
       ? `${result.headquarters.city}, ${result.headquarters.state_province || ''} ${result.headquarters.country}`.trim()
@@ -1192,59 +993,58 @@ app.post("/api/companies/:id/research", async (c) => {
     funding_status: fundingStatus || undefined,
     company_size: companySize || undefined,
     established_date: result.established_date || undefined,
-    research_sources: result.sources.length > 0 ? JSON.stringify(result.sources) : undefined
+    research_sources: result.sources.length > 0 ? JSON.stringify(result.sources) : undefined,
   });
 
   return c.json({ company: updated, research: result });
 });
 
-app.get("/api/interviews/upcoming", (c) => {
-  const root = ensureWorkspaceRoot();
-  const db = getDb(dbPath(root));
-  
-  const interviews = db.query<{
-    id: string;
-    scheduled_at: string;
-    interview_type: string | null;
-    duration_minutes: number | null;
-    location: string | null;
-    video_link: string | null;
-    role_id: string;
-    role_title: string;
-    company_name: string;
-    company_logo_url: string | null;
-  }, []>(`
-    SELECT 
-      i.id,
-      i.scheduled_at,
-      i.interview_type,
-      i.duration_minutes,
-      i.location,
-      i.video_link,
-      r.id as role_id,
-      r.title as role_title,
-      c.name as company_name,
-      c.logo_url as company_logo_url
+app.get("/api/interviews/upcoming", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+
+  const interviews = (await db.unsafe(
+    `
+    SELECT i.id, i.round_name, i.scheduled_at, i.interview_type, i.interviewer_name, i.interviewer_title,
+           c.name as company_name, r.title as role_title
     FROM interviews i
     JOIN applications a ON i.application_id = a.id
     JOIN roles r ON a.role_id = r.id
     JOIN companies c ON r.company_id = c.id
-    WHERE i.scheduled_at >= datetime('now')
+    WHERE i.user_id = $1
+      AND i.scheduled_at IS NOT NULL
+      AND i.scheduled_at <> ''
+      AND i.scheduled_at::timestamptz >= now()
     ORDER BY i.scheduled_at ASC
     LIMIT 10
-  `).all();
-  
+  `,
+    [authUser.id]
+  )) as Array<{
+    id: string;
+    round_name: string;
+    scheduled_at: string | null;
+    interview_type: string | null;
+    interviewer_name: string | null;
+    interviewer_title: string | null;
+    company_name: string;
+    role_title: string;
+  }>;
+
   return c.json(interviews);
 });
 
-app.get("/api/oauth/google/status", (c) => {
-  const root = ensureWorkspaceRoot();
-  const db = getDb(dbPath(root));
+app.get("/api/oauth/google/status", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
   const secrets = loadSecrets();
-  const profile = getUserProfile(db);
-  
+  const profile = await getUserProfile(db, authUser.id);
+
   const refreshToken = secrets.google_calendar_refresh_token || profile?.google_calendar_refresh_token;
-  
+
   return c.json({
     configured: isCalendarConfigured({
       clientId: secrets.google_calendar_client_id,
@@ -1258,37 +1058,41 @@ app.get("/api/oauth/google/status", (c) => {
   });
 });
 
-app.get("/api/oauth/google/authorize", (c) => {
-  void ensureWorkspaceRoot();
+app.get("/api/oauth/google/authorize", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
   const secrets = loadSecrets();
-  
+
   if (!secrets.google_calendar_client_id || !secrets.google_calendar_client_secret) {
     return c.json({ error: "Google Calendar credentials not configured" }, 400);
   }
-  
+
   const authUrl = generateAuthUrl({
     clientId: secrets.google_calendar_client_id,
     clientSecret: secrets.google_calendar_client_secret,
   });
-  
+
   return c.json({ url: authUrl });
 });
 
 app.get("/api/oauth/google/callback", async (c) => {
   const code = c.req.query("code");
-  
+
   if (!code) {
     return c.html("<html><body><h1>Error</h1><p>No authorization code received.</p></body></html>");
   }
-  
-  const root = ensureWorkspaceRoot();
-  const db = getDb(dbPath(root));
+
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.html("<html><body><h1>Error</h1><p>Unauthorized.</p></body></html>");
+  const db = getDb();
   const secrets = loadSecrets();
-  
+
   if (!secrets.google_calendar_client_id || !secrets.google_calendar_client_secret) {
     return c.html("<html><body><h1>Error</h1><p>Google Calendar credentials not configured.</p></body></html>");
   }
-  
+
   try {
     const refreshToken = await exchangeCodeForTokens(
       {
@@ -1297,13 +1101,13 @@ app.get("/api/oauth/google/callback", async (c) => {
       },
       code
     );
-    
+
     if (refreshToken) {
-      const profile = getUserProfile(db);
+      const profile = await getUserProfile(db, authUser.id);
       if (profile) {
-        updateUserProfile(db, profile.id, { google_calendar_refresh_token: refreshToken });
+        await updateUserProfile(db, profile.id, { google_calendar_refresh_token: refreshToken });
       }
-      
+
       return c.html(`
         <html>
           <body style="font-family: system-ui; padding: 40px; text-align: center;">
@@ -1325,14 +1129,17 @@ app.get("/api/oauth/google/callback", async (c) => {
 
 app.delete("/api/oauth/google/disconnect", async (c) => {
   try {
-    const root = ensureWorkspaceRoot();
-    const db = getDb(dbPath(root));
-    const profile = getUserProfile(db);
-    
+    await ensureWorkspaceRoot();
+    const authUser = c.get("authUser");
+    if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+    const db = getDb();
+
+    const profile = await getUserProfile(db, authUser.id);
+
     if (profile) {
-      updateUserProfile(db, profile.id, { google_calendar_refresh_token: null, google_calendar_id: null });
+      await updateUserProfile(db, profile.id, { google_calendar_refresh_token: null, google_calendar_id: null });
     }
-    
+
     return c.json({ success: true });
   } catch (error) {
     console.error("Disconnect error:", error);
@@ -1341,10 +1148,13 @@ app.delete("/api/oauth/google/disconnect", async (c) => {
 });
 
 app.get("/api/calendars", async (c) => {
-  const root = ensureWorkspaceRoot();
-  const db = getDb(dbPath(root));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+
   const secrets = loadSecrets();
-  const profile = getUserProfile(db);
+  const profile = await getUserProfile(db, authUser.id);
 
   if (!secrets.google_calendar_client_id || !secrets.google_calendar_client_secret || !profile?.google_calendar_refresh_token) {
     return c.json({ calendars: [], selectedId: null });
@@ -1365,24 +1175,30 @@ app.get("/api/calendars", async (c) => {
 });
 
 app.put("/api/settings/calendar", async (c) => {
-  const root = ensureWorkspaceRoot();
-  const db = getDb(dbPath(root));
-  const profile = getUserProfile(db);
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+
+  const profile = await getUserProfile(db, authUser.id);
   const body = await c.req.json<{ calendarId: string }>();
 
   if (!profile) {
     return c.json({ error: "No profile found" }, 404);
   }
 
-  updateUserProfile(db, profile.id, { google_calendar_id: body.calendarId });
+  await updateUserProfile(db, profile.id, { google_calendar_id: body.calendarId });
   return c.json({ success: true });
 });
 
 app.get("/api/calendar/events", async (c) => {
-  const root = ensureWorkspaceRoot();
-  const db = getDb(dbPath(root));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+
   const secrets = loadSecrets();
-  const profile = getUserProfile(db);
+  const profile = await getUserProfile(db, authUser.id);
 
   const refreshToken = profile?.google_calendar_refresh_token;
   if (!secrets.google_calendar_client_id || !secrets.google_calendar_client_secret || !refreshToken) {
@@ -1409,10 +1225,11 @@ app.get("/api/calendar/events", async (c) => {
 });
 
 app.post("/api/calendar/events/:eventId/link", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const db = getDb(dbPath(root));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
   const eventId = c.req.param("eventId");
   const body = await c.req.json<{
     role_id: string;
@@ -1423,7 +1240,7 @@ app.post("/api/calendar/events/:eventId/link", async (c) => {
     conferenceLink?: string;
   }>();
 
-  const application = getApplicationByRoleId(db, body.role_id);
+  const application = await getApplicationByRoleId(db, authUser.id, body.role_id);
   if (!application) {
     return c.json({ error: "No application found for this role" }, 404);
   }
@@ -1432,7 +1249,7 @@ app.post("/api/calendar/events/:eventId/link", async (c) => {
   const endDate = new Date(body.endTime);
   const durationMins = Math.round((endDate.getTime() - startDate.getTime()) / 60000);
 
-  const interview = createInterview(db, {
+  const interview = await createInterview(db, authUser.id, {
     application_id: application.id,
     scheduled_at: body.startTime,
     interview_type: "calendar_event",
@@ -1447,31 +1264,32 @@ app.post("/api/calendar/events/:eventId/link", async (c) => {
 });
 
 app.post("/api/interviews/:id/generate-prep", async (c) => {
-  const root = ensureWorkspaceRoot();
-  if (!root) return c.json({ error: "Workspace not initialized" }, 500);
-  
-  const db = getDb(dbPath(root));
+  const root = await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
   const interviewId = c.req.param("id");
   const { apiKey, error, provider, model } = resolveLlmCredentials(root);
-  
+
   if (!apiKey || !provider || !model) {
     return c.json({ error: error ?? "LLM API key not configured" }, 500);
   }
-  
-  const interview = getInterviewById(db, interviewId);
+
+  const interview = await getInterviewById(db, authUser.id, interviewId);
   if (!interview) return c.json({ error: "Interview not found" }, 404);
-  
-  const application = getApplicationById(db, interview.application_id);
+
+  const application = await getApplicationById(db, authUser.id, interview.application_id);
   if (!application) return c.json({ error: "Application not found" }, 404);
-  
-  const role = getRoleById(db, application.role_id);
+
+  const role = await getRoleById(db, authUser.id, application.role_id);
   if (!role) return c.json({ error: "Role not found" }, 404);
-  
-  const company = getCompanyById(db, role.company_id);
+
+  const company = await getCompanyById(db, authUser.id, role.company_id);
   const companyName = company?.name || "Unknown Company";
-  
-  const userProfile = getUserProfile(db);
-  const candidateContext = userProfile ? getCandidateContext(db, userProfile.id) : null;
+
+  const userProfile = await getUserProfile(db, authUser.id);
+  const candidateContext = userProfile ? await getCandidateContext(db, userProfile.id) : null;
   
   const contextToUse = candidateContext?.full_context || `
 Name: ${userProfile?.full_name || "Candidate"}
@@ -1536,29 +1354,34 @@ Return as JSON:
 
 app.post("/api/interviews/:id/sync-calendar", async (c) => {
   const { id } = c.req.param();
-  const root = ensureWorkspaceRoot();
-  const db = getDb(dbPath(root));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+
   const secrets = loadSecrets();
-  const profile = getUserProfile(db);
-  
+  const profile = await getUserProfile(db, authUser.id);
+
   const refreshToken = secrets.google_calendar_refresh_token || profile?.google_calendar_refresh_token;
-  
+
   if (!secrets.google_calendar_client_id || !secrets.google_calendar_client_secret || !refreshToken) {
     return c.json({ error: "Google Calendar not connected" }, 400);
   }
-  
-  const interview = getInterviewById(db, id);
+
+  const interview = await getInterviewById(db, authUser.id, id);
   if (!interview) {
     return c.json({ error: "Interview not found" }, 404);
   }
-  
-  const role = db.query<{ title: string; company_name: string }, [string]>(
+
+  const roleRows = (await db.unsafe(
     `SELECT r.title, c.name as company_name 
-     FROM roles r 
-     JOIN applications a ON r.application_id = a.id 
+     FROM applications a
+     JOIN roles r ON a.role_id = r.id 
      JOIN companies c ON r.company_id = c.id 
-     WHERE a.id = ?`
-  ).get(interview.application_id);
+     WHERE a.user_id = $1 AND a.id = $2`,
+    [authUser.id, interview.application_id]
+  )) as Array<{ title: string; company_name: string }>;
+  const role = roleRows[0];
   
   if (!role) {
     return c.json({ error: "Role not found" }, 404);
@@ -1574,7 +1397,7 @@ app.post("/api/interviews/:id/sync-calendar", async (c) => {
   const endTime = new Date(startTime.getTime() + (interview.duration_minutes || 60) * 60 * 1000);
   
   const interviewTypeLabel = interview.interview_type 
-    ? interview.interview_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+    ? interview.interview_type.replace(/_/g, ' ').replace(/\b\w/g, (char: string) => char.toUpperCase())
     : "Interview";
   
   const eventData = {
@@ -1599,7 +1422,7 @@ app.post("/api/interviews/:id/sync-calendar", async (c) => {
     } else {
       const eventId = await createCalendarEvent(credentials, eventData, calendarId);
       if (eventId) {
-        updateInterview(db, id, { google_calendar_event_id: eventId });
+        await updateInterview(db, authUser.id, id, { google_calendar_event_id: eventId });
         return c.json({ success: true, eventId });
       }
       return c.json({ error: "Failed to create calendar event" }, 500);
@@ -1612,24 +1435,27 @@ app.post("/api/interviews/:id/sync-calendar", async (c) => {
 
 app.delete("/api/interviews/:id/calendar-event", async (c) => {
   const { id } = c.req.param();
-  const root = ensureWorkspaceRoot();
-  const db = getDb(dbPath(root));
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+
   const secrets = loadSecrets();
-  const profile = getUserProfile(db);
-  
-  const interview = getInterviewById(db, id);
+  const profile = await getUserProfile(db, authUser.id);
+
+  const interview = await getInterviewById(db, authUser.id, id);
   if (!interview || !interview.google_calendar_event_id) {
     return c.json({ error: "No calendar event to delete" }, 404);
   }
-  
+
   const refreshToken = secrets.google_calendar_refresh_token || profile?.google_calendar_refresh_token;
-  
+
   if (!secrets.google_calendar_client_id || !secrets.google_calendar_client_secret || !refreshToken) {
     return c.json({ error: "Google Calendar not connected" }, 400);
   }
-  
+
   const calendarId = profile?.google_calendar_id || "primary";
-  
+
   try {
     await deleteCalendarEvent(
       {
@@ -1640,8 +1466,8 @@ app.delete("/api/interviews/:id/calendar-event", async (c) => {
       interview.google_calendar_event_id,
       calendarId
     );
-    
-    updateInterview(db, id, { google_calendar_event_id: undefined });
+
+    await updateInterview(db, authUser.id, id, { google_calendar_event_id: undefined });
     return c.json({ success: true });
   } catch (error) {
     console.error("Calendar delete error:", error);
@@ -1651,3 +1477,12 @@ app.delete("/api/interviews/:id/calendar-event", async (c) => {
 
 app.use("/*", serveStatic({ root: "./dist" }));
 app.get("*", serveStatic({ path: "./dist/index.html" }));
+
+const port = process.env.PORT ? parseInt(process.env.PORT) : 3001;
+
+if (import.meta.main) {
+  serve({ fetch: app.fetch, port });
+  console.log(`Server running at http://localhost:${port}`);
+}
+
+export { app };

@@ -1,13 +1,13 @@
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { getDb, runMigrations } from "../db";
-import { dbPath, companiesDir, promptsDir, templatesDir } from "../workspace";
+import { companiesDir, promptsDir, templatesDir } from "../workspace";
 
 export function initWorkspace(): void {
   const cwd = process.cwd();
-  const dbFile = dbPath(cwd);
+  const configPath = join(cwd, "jobsearch.toml");
 
-  if (existsSync(dbFile)) {
+  if (existsSync(configPath)) {
     return;
   }
 
@@ -15,10 +15,6 @@ export function initWorkspace(): void {
   mkdirSync(promptsDir(cwd), { recursive: true });
   mkdirSync(join(templatesDir(cwd), "pandoc"), { recursive: true });
 
-  const db = getDb(dbFile);
-  runMigrations(db);
-
-  const configPath = join(cwd, "jobsearch.toml");
   if (!existsSync(configPath)) {
     writeFileSync(configPath, DEFAULT_CONFIG);
   }
@@ -31,14 +27,23 @@ export function initWorkspace(): void {
 
 export async function init(): Promise<void> {
   const cwd = process.cwd();
-  const dbFile = dbPath(cwd);
+  const configPath = join(cwd, "jobsearch.toml");
 
-  if (existsSync(dbFile)) {
+  if (existsSync(configPath)) {
     console.log(`Workspace already initialized at ${cwd}`);
     return;
   }
 
   initWorkspace();
+
+  try {
+    const db = getDb();
+    await runMigrations(db);
+  } catch (error) {
+    console.error("Database initialization failed.");
+    console.error(error instanceof Error ? error.message : String(error));
+    console.error("Set DATABASE_URL and ensure the Postgres instance is running.");
+  }
 
   console.log(`Initialized jobsearch workspace at ${cwd}`);
   console.log("Next steps:");
@@ -59,7 +64,10 @@ latex_engine = "xelatex"
 followup_days = 5
 `;
 
-const DEFAULT_ENV = `# LLM provider API keys
+const DEFAULT_ENV = `# Postgres connection (local Docker or Supabase)
+# DATABASE_URL=postgresql://jobspot:jobspot@localhost:5432/jobspot
+
+# LLM provider API keys
 # GEMINI_API_KEY=your-gemini-key
 # OPENAI_API_KEY=your-openai-key
 # ANTHROPIC_API_KEY=your-anthropic-key

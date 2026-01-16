@@ -1,7 +1,7 @@
 import { existsSync } from "fs";
 import { join, dirname } from "path";
 
-const WORKSPACE_MARKER = "jobsearch.sqlite";
+const WORKSPACE_MARKER = "jobsearch.toml";
 
 export function findRoot(startDir?: string): string;
 export function findRoot(
@@ -28,10 +28,6 @@ export function findRoot(
     }
     current = parent;
   }
-}
-
-export function dbPath(root: string): string {
-  return join(root, WORKSPACE_MARKER);
 }
 
 export function profileDir(root: string): string {

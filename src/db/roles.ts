@@ -1,8 +1,9 @@
-import { Database } from "bun:sqlite";
 import { randomUUID } from "crypto";
+import type { DbClient } from "./index";
 
 export interface Role {
   id: string;
+  user_id: string;
   company_id: string;
   title: string;
   level: string | null;
@@ -48,45 +49,64 @@ export interface CreateRoleInput {
   cover_letter?: string;
 }
 
-export function getAllRoles(db: Database): RoleWithCompany[] {
-  return db
-    .query<RoleWithCompany, []>(
-      `SELECT r.*, c.name as company_name
-       FROM roles r
-       JOIN companies c ON r.company_id = c.id
-       ORDER BY r.created_at DESC`
-    )
-    .all();
+export async function getAllRoles(db: DbClient, userId: string): Promise<RoleWithCompany[]> {
+  const rows = (await db.unsafe(
+    `SELECT r.*, c.name as company_name
+     FROM roles r
+     JOIN companies c ON r.company_id = c.id
+     WHERE r.user_id = $1
+     ORDER BY r.created_at DESC`,
+    [userId]
+  )) as RoleWithCompany[];
+
+  return rows;
 }
 
-export function getRoleById(db: Database, id: string): Role | null {
-  return db.query<Role, [string]>("SELECT * FROM roles WHERE id = ?").get(id) ?? null;
+export async function getRoleById(
+  db: DbClient,
+  userId: string,
+  id: string
+): Promise<Role | null> {
+  const rows = (await db.unsafe(
+    "SELECT * FROM roles WHERE user_id = $1 AND id = $2",
+    [userId, id]
+  )) as Role[];
+  return rows[0] ?? null;
 }
 
-export function getRoleWithDetails(db: Database, id: string): RoleWithDetails | null {
-  return (
-    db
-      .query<RoleWithDetails, [string]>(
-        `SELECT r.*, c.name as company_name, c.website as company_website,
-                c.headquarters as company_headquarters, c.description as company_description,
-                c.logo_url as company_logo_url,
-                a.id as application_id, a.status as application_status, a.applied_at
-         FROM roles r
-         JOIN companies c ON r.company_id = c.id
-         LEFT JOIN applications a ON a.role_id = r.id
-         WHERE r.id = ?`
-      )
-      .get(id) ?? null
-  );
+export async function getRoleWithDetails(
+  db: DbClient,
+  userId: string,
+  id: string
+): Promise<RoleWithDetails | null> {
+  const rows = (await db.unsafe(
+    `SELECT r.*, c.name as company_name, c.website as company_website,
+            c.headquarters as company_headquarters, c.description as company_description,
+            c.logo_url as company_logo_url,
+            a.id as application_id, a.status as application_status, a.applied_at
+     FROM roles r
+     JOIN companies c ON r.company_id = c.id
+     LEFT JOIN applications a ON a.role_id = r.id AND a.user_id = $1
+     WHERE r.user_id = $1 AND r.id = $2`,
+    [userId, id]
+  )) as RoleWithDetails[];
+
+  return rows[0] ?? null;
 }
 
-export function createRole(db: Database, input: CreateRoleInput): Role {
+export async function createRole(
+  db: DbClient,
+  userId: string,
+  input: CreateRoleInput
+): Promise<Role> {
   const id = randomUUID();
-  db.run(
-    `INSERT INTO roles (id, company_id, title, level, location, job_url, jd_text, source, compensation_range, compensation_min, compensation_max)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  const rows = (await db.unsafe(
+    `INSERT INTO roles (id, user_id, company_id, title, level, location, job_url, jd_text, source, compensation_range, compensation_min, compensation_max, linkedin_message, cover_letter)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+     RETURNING *`,
     [
       id,
+      userId,
       input.company_id,
       input.title,
       input.level ?? null,
@@ -97,14 +117,23 @@ export function createRole(db: Database, input: CreateRoleInput): Role {
       input.compensation_range ?? null,
       input.compensation_min ?? null,
       input.compensation_max ?? null,
+      input.linkedin_message ?? null,
+      input.cover_letter ?? null,
     ]
-  );
-  return getRoleById(db, id)!;
+  )) as Role[];
+
+  return rows[0]!;
 }
 
-export function updateRole(db: Database, id: string, input: Partial<CreateRoleInput>): Role {
+export async function updateRole(
+  db: DbClient,
+  userId: string,
+  id: string,
+  input: Partial<CreateRoleInput>
+): Promise<Role> {
   const sets: string[] = [];
   const values: (string | number | null)[] = [];
+  let index = 1;
 
   const fields: (keyof CreateRoleInput)[] = [
     "title",
@@ -122,53 +151,79 @@ export function updateRole(db: Database, id: string, input: Partial<CreateRoleIn
 
   for (const field of fields) {
     if (input[field] !== undefined) {
-      sets.push(`${field} = ?`);
+      sets.push(`${field} = $${index++}`);
       values.push(input[field] ?? null);
     }
   }
 
   if (sets.length > 0) {
-    sets.push("updated_at = datetime('now')");
-    values.push(id);
-    db.run(`UPDATE roles SET ${sets.join(", ")} WHERE id = ?`, values);
+    sets.push("updated_at = now()::text");
+    values.push(userId, id);
+    const query = `UPDATE roles SET ${sets.join(", ")} WHERE user_id = $${index} AND id = $${index + 1} RETURNING *`;
+    const rows = (await db.unsafe(query, values)) as Role[];
+    return rows[0]!;
   }
 
-  return getRoleById(db, id)!;
+  const rows = (await db.unsafe(
+    "SELECT * FROM roles WHERE user_id = $1 AND id = $2",
+    [userId, id]
+  )) as Role[];
+  return rows[0]!;
 }
 
-export function updateRoleJd(db: Database, id: string, jdText: string): Role {
-  db.run("UPDATE roles SET jd_text = ?, updated_at = datetime('now') WHERE id = ?", [jdText, id]);
-  return getRoleById(db, id)!;
+export async function updateRoleJd(
+  db: DbClient,
+  userId: string,
+  id: string,
+  jdText: string
+): Promise<Role> {
+  const rows = (await db.unsafe(
+    "UPDATE roles SET jd_text = $1, updated_at = now()::text WHERE user_id = $2 AND id = $3 RETURNING *",
+    [jdText, userId, id]
+  )) as Role[];
+
+  return rows[0]!;
 }
 
-export function findDuplicateRole(
-  db: Database,
+export async function findDuplicateRole(
+  db: DbClient,
+  userId: string,
   jobUrl: string | null,
   companyId: string,
   title: string
-): Role | null {
+): Promise<Role | null> {
   if (jobUrl) {
-    const byUrl = db
-      .query<Role, [string]>("SELECT * FROM roles WHERE job_url = ?")
-      .get(jobUrl);
-    if (byUrl) return byUrl;
+    const rows = (await db.unsafe(
+      "SELECT * FROM roles WHERE user_id = $1 AND job_url = $2",
+      [userId, jobUrl]
+    )) as Role[];
+    if (rows[0]) return rows[0];
   }
 
-  const byCompanyTitle = db
-    .query<Role, [string, string]>(
-      "SELECT * FROM roles WHERE company_id = ? AND title = ?"
-    )
-    .get(companyId, title);
-  
-  return byCompanyTitle ?? null;
+  const rows = (await db.unsafe(
+    "SELECT * FROM roles WHERE user_id = $1 AND company_id = $2 AND title = $3",
+    [userId, companyId, title]
+  )) as Role[];
+
+  return rows[0] ?? null;
 }
 
-export function deleteRole(db: Database, id: string): boolean {
-  db.run("DELETE FROM role_research WHERE role_id = ?", [id]);
-  db.run("DELETE FROM application_questions WHERE role_id = ?", [id]);
-  db.run("DELETE FROM interviews WHERE application_id IN (SELECT id FROM applications WHERE role_id = ?)", [id]);
-  db.run("DELETE FROM tasks WHERE application_id IN (SELECT id FROM applications WHERE role_id = ?)", [id]);
-  db.run("DELETE FROM applications WHERE role_id = ?", [id]);
-  db.run("DELETE FROM roles WHERE id = ?", [id]);
+export async function deleteRole(
+  db: DbClient,
+  userId: string,
+  id: string
+): Promise<boolean> {
+  await db.unsafe("DELETE FROM role_research WHERE user_id = $1 AND role_id = $2", [userId, id]);
+  await db.unsafe("DELETE FROM application_questions WHERE user_id = $1 AND role_id = $2", [userId, id]);
+  await db.unsafe(
+    "DELETE FROM interviews WHERE user_id = $1 AND application_id IN (SELECT id FROM applications WHERE user_id = $1 AND role_id = $2)",
+    [userId, id]
+  );
+  await db.unsafe(
+    "DELETE FROM tasks WHERE user_id = $1 AND application_id IN (SELECT id FROM applications WHERE user_id = $1 AND role_id = $2)",
+    [userId, id]
+  );
+  await db.unsafe("DELETE FROM applications WHERE user_id = $1 AND role_id = $2", [userId, id]);
+  await db.unsafe("DELETE FROM roles WHERE user_id = $1 AND id = $2", [userId, id]);
   return true;
 }

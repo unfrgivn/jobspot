@@ -1,8 +1,9 @@
-import { Database } from "bun:sqlite";
 import { randomUUID } from "crypto";
+import type { DbClient } from "./index";
 
 export interface ApplicationQuestion {
   id: string;
+  user_id: string;
   role_id: string;
   question: string;
   generated_answer: string | null;
@@ -11,59 +12,66 @@ export interface ApplicationQuestion {
   updated_at: string;
 }
 
-export function getQuestionsByRoleId(db: Database, roleId: string): ApplicationQuestion[] {
-  return db
-    .query<ApplicationQuestion, [string]>(
-      "SELECT * FROM application_questions WHERE role_id = ? ORDER BY created_at DESC"
-    )
-    .all(roleId);
+export async function getQuestionsByRoleId(
+  db: DbClient,
+  userId: string,
+  roleId: string
+): Promise<ApplicationQuestion[]> {
+  const rows = (await db.unsafe(
+    "SELECT * FROM application_questions WHERE user_id = $1 AND role_id = $2 ORDER BY created_at DESC",
+    [userId, roleId]
+  )) as ApplicationQuestion[];
+
+  return rows;
 }
 
-export function createQuestion(
-  db: Database,
+export async function createQuestion(
+  db: DbClient,
+  userId: string,
   roleId: string,
   question: string,
   generatedAnswer: string | null
-): ApplicationQuestion {
+): Promise<ApplicationQuestion> {
   const id = randomUUID();
-  db.run(
-    `INSERT INTO application_questions (id, role_id, question, generated_answer)
-     VALUES (?, ?, ?, ?)`,
-    [id, roleId, question, generatedAnswer]
-  );
-  return db
-    .query<ApplicationQuestion, [string]>("SELECT * FROM application_questions WHERE id = ?")
-    .get(id)!;
+  const rows = (await db.unsafe(
+    `INSERT INTO application_questions (id, user_id, role_id, question, generated_answer)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING *`,
+    [id, userId, roleId, question, generatedAnswer]
+  )) as ApplicationQuestion[];
+
+  return rows[0]!;
 }
 
-export function updateQuestion(
-  db: Database,
+export async function updateQuestion(
+  db: DbClient,
+  userId: string,
   id: string,
   updates: { generated_answer?: string; submitted_answer?: string }
-): ApplicationQuestion | null {
-  const setClauses: string[] = ["updated_at = datetime('now')"];
+): Promise<ApplicationQuestion | null> {
+  const setClauses: string[] = ["updated_at = now()::text"];
   const params: (string | null)[] = [];
+  let index = 1;
 
   if (updates.generated_answer !== undefined) {
-    setClauses.push("generated_answer = ?");
+    setClauses.push(`generated_answer = $${index++}`);
     params.push(updates.generated_answer);
   }
   if (updates.submitted_answer !== undefined) {
-    setClauses.push("submitted_answer = ?");
+    setClauses.push(`submitted_answer = $${index++}`);
     params.push(updates.submitted_answer);
   }
 
-  params.push(id);
-  db.run(
-    `UPDATE application_questions SET ${setClauses.join(", ")} WHERE id = ?`,
-    params
-  );
-
-  return db
-    .query<ApplicationQuestion, [string]>("SELECT * FROM application_questions WHERE id = ?")
-    .get(id);
+  params.push(userId, id);
+  const query = `UPDATE application_questions SET ${setClauses.join(", ")} WHERE user_id = $${index} AND id = $${index + 1} RETURNING *`;
+  const rows = (await db.unsafe(query, params)) as ApplicationQuestion[];
+  return rows[0] ?? null;
 }
 
-export function deleteQuestion(db: Database, id: string): void {
-  db.run("DELETE FROM application_questions WHERE id = ?", [id]);
+export async function deleteQuestion(
+  db: DbClient,
+  userId: string,
+  id: string
+): Promise<void> {
+  await db.unsafe("DELETE FROM application_questions WHERE user_id = $1 AND id = $2", [userId, id]);
 }

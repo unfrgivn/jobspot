@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { findRoot, dbPath } from "../workspace";
+import { findRoot } from "../workspace";
 import { getDb } from "../db";
 import { loadConfig, loadSecrets, resolveLlmApiKey } from "../config";
 import * as cheerio from "cheerio";
@@ -19,9 +19,9 @@ export interface AddRoleResult {
   hasJd: boolean;
 }
 
-export async function addRole(opts: AddRoleOptions): Promise<AddRoleResult> {
+export async function addRole(userId: string, opts: AddRoleOptions): Promise<AddRoleResult> {
   const root = findRoot();
-  const db = getDb(dbPath(root));
+  const db = getDb();
 
   let companyName = opts.company;
   let jobTitle = opts.title;
@@ -62,27 +62,31 @@ export async function addRole(opts: AddRoleOptions): Promise<AddRoleResult> {
     throw new Error("Job title required. Use --title or provide a scrapeable --url");
   }
 
-  let companyRow = db
-    .query<{ id: string }, [string]>("SELECT id FROM companies WHERE name = ?")
-    .get(companyName);
+  const companyRows = (await db.unsafe(
+    "SELECT id FROM companies WHERE user_id = $1 AND name = $2",
+    [userId, companyName]
+  )) as Array<{ id: string }>;
+  let companyRow = companyRows[0];
 
   if (!companyRow) {
     const companyId = randomUUID();
-    db.run(
-      "INSERT INTO companies (id, name, website, headquarters, logo_url, description) VALUES (?, ?, ?, ?, ?, ?)",
-      [companyId, companyName, companyWebsite, companyHeadquarters, companyLogoUrl, companyDescription]
+    await db.unsafe(
+      "INSERT INTO companies (id, user_id, name, website, headquarters, logo_url, description) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+      [companyId, userId, companyName, companyWebsite, companyHeadquarters, companyLogoUrl, companyDescription]
     );
     companyRow = { id: companyId };
   } else if (companyWebsite || companyHeadquarters || companyLogoUrl || companyDescription) {
-    db.run(
-      "UPDATE companies SET website = COALESCE(?, website), headquarters = COALESCE(?, headquarters), logo_url = COALESCE(?, logo_url), description = COALESCE(?, description), updated_at = datetime('now') WHERE id = ?",
-      [companyWebsite, companyHeadquarters, companyLogoUrl, companyDescription, companyRow.id]
+    await db.unsafe(
+      "UPDATE companies SET website = COALESCE($1, website), headquarters = COALESCE($2, headquarters), logo_url = COALESCE($3, logo_url), description = COALESCE($4, description), updated_at = now()::text WHERE user_id = $5 AND id = $6",
+      [companyWebsite, companyHeadquarters, companyLogoUrl, companyDescription, userId, companyRow.id]
     );
   }
 
-  const existingRole = db
-    .query<{ id: string }, [string | null]>("SELECT id FROM roles WHERE job_url = ?")
-    .get(jobUrl ?? null);
+  const existingRoleRows = (await db.unsafe(
+    "SELECT id FROM roles WHERE user_id = $1 AND job_url = $2",
+    [userId, jobUrl ?? null]
+  )) as Array<{ id: string }>;
+  const existingRole = existingRoleRows[0];
   
   if (existingRole) {
     const error = new Error("Role already added") as Error & { existingRoleId?: string };
@@ -90,11 +94,11 @@ export async function addRole(opts: AddRoleOptions): Promise<AddRoleResult> {
     throw error;
   }
 
-  const duplicateByTitle = db
-    .query<{ id: string }, [string, string]>(
-      "SELECT id FROM roles WHERE company_id = ? AND title = ?"
-    )
-    .get(companyRow.id, jobTitle);
+  const duplicateByTitleRows = (await db.unsafe(
+    "SELECT id FROM roles WHERE user_id = $1 AND company_id = $2 AND title = $3",
+    [userId, companyRow.id, jobTitle]
+  )) as Array<{ id: string }>;
+  const duplicateByTitle = duplicateByTitleRows[0];
   
   if (duplicateByTitle) {
     const error = new Error("Role already added") as Error & { existingRoleId?: string };
@@ -103,16 +107,27 @@ export async function addRole(opts: AddRoleOptions): Promise<AddRoleResult> {
   }
 
   const roleId = randomUUID();
-  db.run(
-    `INSERT INTO roles (id, company_id, title, job_url, jd_text, location, compensation_range, compensation_min, compensation_max) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [roleId, companyRow.id, jobTitle, jobUrl ?? null, jdText, location, compensationRange, compensationMin, compensationMax]
+  await db.unsafe(
+    "INSERT INTO roles (id, user_id, company_id, title, job_url, jd_text, location, compensation_range, compensation_min, compensation_max) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    [
+      roleId,
+      userId,
+      companyRow.id,
+      jobTitle,
+      jobUrl ?? null,
+      jdText,
+      location,
+      compensationRange,
+      compensationMin,
+      compensationMax,
+    ]
   );
 
   const applicationId = randomUUID();
-  db.run(`INSERT INTO applications (id, role_id, status) VALUES (?, ?, 'wishlist')`, [
-    applicationId,
-    roleId,
-  ]);
+  await db.unsafe(
+    "INSERT INTO applications (id, user_id, role_id, status) VALUES ($1, $2, $3, 'wishlist')",
+    [applicationId, userId, roleId]
+  );
 
   if (jdText) {
     try {
@@ -123,7 +138,7 @@ export async function addRole(opts: AddRoleOptions): Promise<AddRoleResult> {
 
       if (apiKey) {
         const { generateRoleResearch } = await import("./research");
-        await generateRoleResearch(roleId);
+        await generateRoleResearch(userId, roleId);
         
         const { researchCompany } = await import("../llm/company-research");
         const { updateCompany } = await import("../db/companies");
@@ -139,7 +154,7 @@ export async function addRole(opts: AddRoleOptions): Promise<AddRoleResult> {
             ? JSON.stringify(result.company_size)
             : null;
           
-          updateCompany(db, companyRow.id, {
+          await updateCompany(db, userId, companyRow.id, {
             website: result.website || undefined,
             headquarters: result.headquarters.city && result.headquarters.country 
               ? `${result.headquarters.city}, ${result.headquarters.state_province || ''} ${result.headquarters.country}`.trim()
@@ -166,34 +181,24 @@ export async function addRole(opts: AddRoleOptions): Promise<AddRoleResult> {
   };
 }
 
-export async function add(opts: AddRoleOptions): Promise<void> {
-  try {
-    const result = await addRole(opts);
-    console.log(`Added role: ${result.title} at ${result.company}`);
-    console.log(`Role ID: ${result.roleId}`);
-
-    if (!result.hasJd) {
-      console.log(`\nNo job description yet. Run: jobsearch paste-jd ${result.roleId}`);
-    }
-  } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  }
+export async function add(_opts: AddRoleOptions): Promise<void> {
+  console.error("CLI commands are disabled. Use the web UI.");
+  process.exit(1);
 }
 
-export async function refreshRole(roleId: string): Promise<{
+export async function refreshRole(userId: string, roleId: string): Promise<{
   updated: boolean;
   message: string;
   researchGenerated?: boolean;
 }> {
   const root = findRoot();
-  const db = getDb(dbPath(root));
+  const db = getDb();
 
-  const role = db
-    .query<{ id: string; job_url: string | null; company_id: string }, [string]>(
-      "SELECT id, job_url, company_id FROM roles WHERE id = ?"
-    )
-    .get(roleId);
+  const roleRows = (await db.unsafe(
+    "SELECT id, job_url, company_id FROM roles WHERE user_id = $1 AND id = $2",
+    [userId, roleId]
+  )) as Array<{ id: string; job_url: string | null; company_id: string }>;
+  const role = roleRows[0];
 
   if (!role) {
     throw new Error("Role not found");
@@ -208,33 +213,43 @@ export async function refreshRole(roleId: string): Promise<{
     return { updated: false, message: "Failed to scrape job posting" };
   }
 
-  db.run(
+  await db.unsafe(
     `UPDATE roles SET 
-      title = COALESCE(?, title),
-      jd_text = COALESCE(?, jd_text),
-      location = COALESCE(?, location),
-      compensation_range = COALESCE(?, compensation_range),
-      compensation_min = COALESCE(?, compensation_min),
-      compensation_max = COALESCE(?, compensation_max),
-      updated_at = datetime('now')
-    WHERE id = ?`,
-    [scraped.title || null, scraped.description || null, scraped.location || null, scraped.compensation || null, scraped.compensationMin || null, scraped.compensationMax || null, roleId]
+      title = COALESCE($1, title),
+      jd_text = COALESCE($2, jd_text),
+      location = COALESCE($3, location),
+      compensation_range = COALESCE($4, compensation_range),
+      compensation_min = COALESCE($5, compensation_min),
+      compensation_max = COALESCE($6, compensation_max),
+      updated_at = now()::text
+    WHERE user_id = $7 AND id = $8`,
+    [
+      scraped.title || null,
+      scraped.description || null,
+      scraped.location || null,
+      scraped.compensation || null,
+      scraped.compensationMin || null,
+      scraped.compensationMax || null,
+      userId,
+      roleId,
+    ]
   );
 
   if (scraped.companyWebsite || scraped.companyHeadquarters || scraped.companyLogoUrl || scraped.companyDescription) {
-    db.run(
+    await db.unsafe(
       `UPDATE companies SET 
-        website = COALESCE(?, website),
-        headquarters = COALESCE(?, headquarters),
-        logo_url = COALESCE(?, logo_url),
-        description = COALESCE(?, description),
-        updated_at = datetime('now')
-      WHERE id = ?`,
+        website = COALESCE($1, website),
+        headquarters = COALESCE($2, headquarters),
+        logo_url = COALESCE($3, logo_url),
+        description = COALESCE($4, description),
+        updated_at = now()::text
+      WHERE user_id = $5 AND id = $6`,
       [
         scraped.companyWebsite || null,
         scraped.companyHeadquarters || null,
         scraped.companyLogoUrl || null,
         scraped.companyDescription || null,
+        userId,
         role.company_id,
       ]
     );
@@ -249,7 +264,7 @@ export async function refreshRole(roleId: string): Promise<{
 
     if (apiKey && scraped.description) {
       const { generateRoleResearch } = await import("./research");
-      await generateRoleResearch(roleId);
+      await generateRoleResearch(userId, roleId);
       researchGenerated = true;
     }
   } catch (error) {
