@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Workspace data (DB is local, not committed)
+*.sqlite*
+
+# Secrets
+jobsearch.secrets.toml
+
+# Generated application artifacts
+companies/
+
+# Profile artifacts that should stay local
+profile/resume.pdf
+profile/resume_extracted.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs and temp
+*.log
+*.tmp
+
+# Local databases
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db

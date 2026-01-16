@@ -1,0 +1,9 @@
+[llm]
+provider = "gemini"
+model = "gemini-3.0-flash"
+
+[renderer]
+latex_engine = "xelatex"
+
+[defaults]
+followup_days = 5
