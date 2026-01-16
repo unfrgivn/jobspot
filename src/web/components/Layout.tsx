@@ -88,14 +88,19 @@ export function Layout() {
           <div className="hidden md:flex items-center gap-4 pl-4 ml-2 border-l h-8">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <button className="relative h-8 w-8 rounded-full overflow-hidden border bg-muted hover:opacity-80 transition-opacity outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
-                  {user?.avatar_url ? (
-                    <img src={user.avatar_url} alt={user.name || "User"} className="h-full w-full object-cover" />
-                  ) : (
-                    <div className="flex h-full w-full items-center justify-center bg-primary/10 text-primary">
-                      <User className="h-4 w-4" />
-                    </div>
-                  )}
+                <button className="flex items-center gap-2 pl-2 pr-1 py-1 rounded-full transition-colors hover:bg-muted/60 outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
+                  <span className="text-sm font-medium pl-1">
+                    {user?.name?.split(" ")[0] || user?.email?.split("@")[0] || "User"}
+                  </span>
+                  <div className="relative h-8 w-8 rounded-full overflow-hidden border bg-muted shadow-sm">
+                    {user?.avatar_url ? (
+                      <img src={user.avatar_url} alt={user.name || "User"} className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center bg-primary/10 text-primary">
+                        <User className="h-4 w-4" />
+                      </div>
+                    )}
+                  </div>
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
