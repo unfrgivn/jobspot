@@ -138,6 +138,7 @@ export function Settings() {
   const [loadingCalendars, setLoadingCalendars] = useState(false);
   const [connectingCalendar, setConnectingCalendar] = useState(false);
   const [disconnectingCalendar, setDisconnectingCalendar] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
   const [formData, setFormData] = useState({
     full_name: "",
     email: "",
@@ -246,6 +247,7 @@ export function Settings() {
     if (!profile) return;
     
     setSaving(true);
+    setSaveStatus("idle");
     try {
       const response = await fetch(`/api/profile/${profile.id}`, {
         method: "PUT",
@@ -256,12 +258,17 @@ export function Settings() {
       if (response.ok) {
         const updated = await response.json();
         setProfile(updated);
+        setSaveStatus("success");
+        addToast({ title: "Profile saved successfully", variant: "success" });
+        setTimeout(() => setSaveStatus("idle"), 3000);
       } else {
         console.error("Failed to save profile");
+        setSaveStatus("error");
         addToast({ title: "Failed to save profile", variant: "error" });
       }
     } catch (error) {
       console.error("Failed to save profile:", error);
+      setSaveStatus("error");
       addToast({ title: "Failed to save profile", variant: "error" });
     } finally {
       setSaving(false);
@@ -608,7 +615,19 @@ export function Settings() {
                     </div>
                   </div>
 
-                  <div className="flex justify-end">
+                  <div className="flex items-center justify-end gap-4">
+                    {saveStatus === "success" && (
+                      <div className="flex items-center gap-1.5 text-sm text-emerald-600 font-medium animate-in fade-in slide-in-from-right-4">
+                        <CheckCircle className="h-4 w-4" />
+                        Profile saved
+                      </div>
+                    )}
+                    {saveStatus === "error" && (
+                      <div className="flex items-center gap-1.5 text-sm text-red-600 font-medium animate-in fade-in slide-in-from-right-4">
+                        <AlertCircle className="h-4 w-4" />
+                        Failed to save
+                      </div>
+                    )}
                     <Button onClick={handleSaveProfile} disabled={saving || !profile}>
                       {saving ? (
                         <>
