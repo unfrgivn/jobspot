@@ -11,6 +11,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
+import { ProfileCompletionBanner } from "./ProfileCompletionBanner";
 
 const navItems = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
@@ -173,6 +174,7 @@ export function Layout() {
           </nav>
         </div>
       </header>
+      <ProfileCompletionBanner />
       <main className="container py-6 px-4 mx-auto" style={{ maxWidth: "1600px" }}>
         <Outlet />
       </main>
