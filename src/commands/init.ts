@@ -79,4 +79,9 @@ const DEFAULT_ENV = `# Postgres connection (local Docker or Supabase)
 # GOOGLE_CALENDAR_CLIENT_ID=your-client-id
 # GOOGLE_CALENDAR_CLIENT_SECRET=your-client-secret
 # GOOGLE_CALENDAR_REFRESH_TOKEN=your-refresh-token
+
+# Google OAuth login (optional)
+# GOOGLE_OAUTH_CLIENT_ID=your-client-id
+# GOOGLE_OAUTH_CLIENT_SECRET=your-client-secret
+# GOOGLE_OAUTH_REDIRECT_URI=http://localhost:3001/api/auth/google/callback
 `;

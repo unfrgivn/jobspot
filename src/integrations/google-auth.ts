@@ -9,8 +9,9 @@ export function isGoogleAuthConfigured(secrets: Secrets): boolean {
   return Boolean(secrets.google_oauth_client_id && secrets.google_oauth_client_secret);
 }
 
-export function getGoogleAuthRedirectUri(_secrets: Secrets): string {
-  return DEFAULT_REDIRECT_URI;
+export function getGoogleAuthRedirectUri(secrets: Secrets): string {
+  const redirectUri = secrets.google_oauth_redirect_uri?.trim();
+  return redirectUri || DEFAULT_REDIRECT_URI;
 }
 
 function createOAuth2Client(secrets: Secrets) {
