@@ -48,8 +48,6 @@ interface UserProfile {
   portfolio_url: string | null;
   about_me: string | null;
   why_looking: string | null;
-  building_teams: string | null;
-  ai_shift: string | null;
   experience_json: string | null;
   cover_letter_tone: string | null;
   cover_letter_structure: string | null;
@@ -130,7 +128,6 @@ export function Settings() {
     career_trajectory?: string;
   }
   const [candidateContext, setCandidateContext] = useState<CandidateContext | null>(null);
-  const [contextLoading, setContextLoading] = useState(false);
   const [refreshingContext, setRefreshingContext] = useState(false);
   const [calendarStatus, setCalendarStatus] = useState<{ configured: boolean; connected: boolean } | null>(null);
   const [calendars, setCalendars] = useState<{ id: string; summary: string; primary?: boolean }[]>([]);
@@ -147,8 +144,6 @@ export function Settings() {
     portfolio_url: "",
     about_me: "",
     why_looking: "",
-    building_teams: "",
-    ai_shift: "",
   });
 
   const handleResumeUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -158,7 +153,7 @@ export function Settings() {
     setUploadingResume(true);
     try {
       const formDataObj = new FormData();
-      formDataObj.append("resume", file);
+      formDataObj.append("file", file);
 
       const response = await fetch(`/api/profile/${profile.id}/resume`, {
         method: "POST",
@@ -196,8 +191,6 @@ export function Settings() {
           portfolio_url: data.portfolio_url || "",
           about_me: data.about_me || "",
           why_looking: data.why_looking || "",
-          building_teams: data.building_teams || "",
-          ai_shift: data.ai_shift || "",
         });
       }
     } catch (error) {
@@ -209,7 +202,6 @@ export function Settings() {
   };
 
   const loadCandidateContext = async () => {
-    setContextLoading(true);
     try {
       const response = await fetch("/api/candidate-context");
       if (response.ok) {
@@ -217,8 +209,8 @@ export function Settings() {
         setCandidateContext(data);
       }
     } catch (error) {
-      console.error("Failed to save calendar preference:", error);
-      addToast({ title: "Failed to save calendar preference", variant: "error" });
+      console.error("Failed to load candidate context:", error);
+      addToast({ title: "Failed to load candidate context", variant: "error" });
     }
   };
 
@@ -559,28 +551,6 @@ export function Settings() {
                     />
                   </div>
 
-                  <div className="space-y-2">
-                    <Label htmlFor="building_teams">Team Building Experience</Label>
-                    <Textarea
-                      id="building_teams"
-                      value={formData.building_teams}
-                      onChange={(e) => setFormData({ ...formData, building_teams: e.target.value })}
-                      placeholder="Your experience building and leading teams..."
-                      rows={3}
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="ai_shift">AI/Tech Shift Perspective</Label>
-                    <Textarea
-                      id="ai_shift"
-                      value={formData.ai_shift}
-                      onChange={(e) => setFormData({ ...formData, ai_shift: e.target.value })}
-                      placeholder="Your thoughts on AI and technology trends..."
-                      rows={3}
-                    />
-                  </div>
-
                   <div className="border-t pt-6">
                     <div className="space-y-4">
                       <div className="flex items-center justify-between">
@@ -603,7 +573,7 @@ export function Settings() {
                       <div className="flex items-center gap-3">
                         <Input
                           type="file"
-                          accept=".txt,.pdf,.doc,.docx"
+                          accept=".txt,.pdf"
                           onChange={handleResumeUpload}
                           disabled={uploadingResume || !profile}
                           className="flex-1"
@@ -679,11 +649,7 @@ export function Settings() {
               </div>
             </CardHeader>
             <CardContent className="space-y-4">
-              {contextLoading ? (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 className="h-6 w-6 animate-spin text-slate-400" />
-                </div>
-              ) : candidateContext ? (
+              {candidateContext ? (
                 <>
                   <div className="grid grid-cols-3 gap-3 text-xs">
                     <div className={`p-3 rounded-lg border ${candidateContext.resume_parsed_at ? 'bg-green-50 border-green-200' : 'bg-slate-50 border-slate-200'}`}>

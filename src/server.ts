@@ -8,6 +8,7 @@ import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { randomUUID } from "crypto";
 import { findRoot } from "./workspace";
 import { getDb, runMigrations } from "./db";
+import { extractTextFromPDF } from "./lib/pdf-parser";
 import {
   getAllCompanies,
   getCompanyById,
@@ -78,7 +79,6 @@ import { applyToRole } from "./commands/apply";
 import { addRole, refreshRole } from "./commands/add";
 import type { AddRoleOptions } from "./commands/add";
 import { initWorkspace } from "./commands/init";
-import { runDoctor } from "./commands/doctor";
 import { generateCoverLetterStream } from "./llm/gemini";
 import { generateCompanyResearch } from "./llm/research";
 import { researchCompany } from "./llm/company-research";
@@ -96,6 +96,7 @@ import {
   updateUserProfile,
   initUserProfileTable,
 } from "./db/user_profile";
+import type { UserProfile } from "./db/user_profile";
 import type { User } from "./db/users";
 import { getOrCreateUserFromGoogleProfile, getUserById } from "./db/users";
 import { createSession, deleteExpiredSessions, deleteSession, getSessionById } from "./db/sessions";
@@ -282,13 +283,36 @@ app.use("/api/*", async (c, next) => {
 app.get("/api/health", (c) => c.json({ status: "ok" }));
 
 app.get("/api/doctor", async (c) => {
-  const results = await runDoctor();
-  const checks = results.map((r) => ({
-    name: r.label,
-    status: r.ok ? "ok" : "error",
-    message: r.ok ? "Operational" : "Check failed",
-  }));
-  const allOk = results.every((r) => r.ok);
+  const checks: Array<{ name: string; status: "ok" | "error"; message: string }> = [];
+  let root: string | null = null;
+
+  try {
+    root = await ensureWorkspaceRoot();
+    checks.push({ name: "Workspace", status: "ok", message: `Workspace found at ${root}` });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Workspace not initialized";
+    checks.push({ name: "Workspace", status: "error", message });
+    return c.json({ checks, allOk: false });
+  }
+
+  try {
+    const db = getDb();
+    await db.unsafe("SELECT 1");
+    checks.push({ name: "Database", status: "ok", message: "Connected" });
+  } catch {
+    checks.push({ name: "Database", status: "error", message: "Database connection failed" });
+  }
+
+  if (root) {
+    const { apiKey, error, provider, model } = resolveLlmCredentials(root);
+    if (apiKey && provider && model) {
+      checks.push({ name: "LLM", status: "ok", message: `${provider} configured` });
+    } else {
+      checks.push({ name: "LLM", status: "error", message: error ?? "LLM provider not configured" });
+    }
+  }
+
+  const allOk = checks.every((check) => check.status === "ok");
   return c.json({ checks, allOk });
 });
 
@@ -409,6 +433,166 @@ app.post("/api/auth/logout", async (c) => {
   }
   clearSessionCookie(c);
   return c.json({ success: true });
+});
+
+app.get("/api/profile", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
+  let profile = await getUserProfile(db, authUser.id);
+  if (!profile) {
+    profile = await createUserProfile(db, authUser.id, {
+      full_name: authUser.name ?? null,
+      email: authUser.email ?? null,
+    });
+  }
+
+  return c.json(profile);
+});
+
+app.put("/api/profile/:id", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
+  const profile = await getUserProfile(db, authUser.id);
+  if (!profile || profile.id !== c.req.param("id")) {
+    return c.json({ error: "Profile not found" }, 404);
+  }
+
+  const body = await c.req.json<Partial<UserProfile>>();
+  const normalizeField = (value: unknown): string | null | undefined => {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    return trimmed === "" ? null : trimmed;
+  };
+
+  const updates = {
+    full_name: normalizeField(body.full_name),
+    email: normalizeField(body.email),
+    phone: normalizeField(body.phone),
+    linkedin_url: normalizeField(body.linkedin_url),
+    portfolio_url: normalizeField(body.portfolio_url),
+    about_me: normalizeField(body.about_me),
+    why_looking: normalizeField(body.why_looking),
+    building_teams: normalizeField(body.building_teams),
+    ai_shift: normalizeField(body.ai_shift),
+    experience_json: normalizeField(body.experience_json),
+  };
+
+  const updated = await updateUserProfile(db, profile.id, updates);
+  return c.json(updated);
+});
+
+app.post("/api/profile/:id/resume", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
+  const profile = await getUserProfile(db, authUser.id);
+  if (!profile || profile.id !== c.req.param("id")) {
+    return c.json({ error: "Profile not found" }, 404);
+  }
+
+  const formData = await c.req.raw.formData();
+  const file = formData.get("file") ?? formData.get("resume");
+  if (!(file instanceof File)) {
+    return c.json({ error: "Resume file is required" }, 400);
+  }
+
+  const filename = file.name || "resume";
+  const extension = filename.split(".").pop()?.toLowerCase();
+  let resumeText: string;
+
+  if (extension === "pdf") {
+    const buffer = Buffer.from(await file.arrayBuffer());
+    resumeText = await extractTextFromPDF(buffer);
+  } else if (extension === "txt") {
+    resumeText = await file.text();
+  } else {
+    return c.json({ error: "Unsupported file type. Upload a PDF or TXT." }, 400);
+  }
+
+  const updated = await updateUserProfile(db, profile.id, {
+    resume_text: resumeText,
+    resume_file_path: filename,
+  });
+
+  const timestamp = new Date().toISOString();
+  const existingContext = await getCandidateContext(db, profile.id);
+  if (existingContext) {
+    await updateCandidateContext(db, existingContext.id, { resume_parsed_at: timestamp });
+  } else {
+    await createCandidateContext(db, profile.id, { resume_parsed_at: timestamp });
+  }
+
+  return c.json(updated);
+});
+
+app.get("/api/candidate-context", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
+  let profile = await getUserProfile(db, authUser.id);
+  if (!profile) {
+    profile = await createUserProfile(db, authUser.id, {
+      full_name: authUser.name ?? null,
+      email: authUser.email ?? null,
+    });
+  }
+
+  const candidateContext = await getCandidateContext(db, profile.id);
+  return c.json(candidateContext);
+});
+
+app.post("/api/candidate-context/refresh", async (c) => {
+  const root = await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
+  const profile = await getUserProfile(db, authUser.id);
+  if (!profile) return c.json({ error: "No profile found" }, 404);
+
+  const { apiKey, error, provider, model } = resolveLlmCredentials(root);
+  if (!apiKey || !provider || !model) {
+    return c.json({ error: error ?? "LLM API key not configured" }, 500);
+  }
+
+  const linkedinData = profile.linkedin_url
+    ? await scrapeLinkedInProfile(profile.linkedin_url)
+    : null;
+  const portfolioData = profile.portfolio_url
+    ? await scrapePortfolioSite(profile.portfolio_url)
+    : null;
+
+  const synthesized = await buildCandidateContext(
+    { profile, linkedinData, portfolioData },
+    { provider, apiKey, model }
+  );
+  const timestamp = new Date().toISOString();
+
+  const payload = {
+    ...synthesized,
+    linkedin_scraped_at: linkedinData ? timestamp : null,
+    portfolio_scraped_at: portfolioData ? timestamp : null,
+    resume_parsed_at: profile.resume_text?.trim() ? timestamp : null,
+  };
+
+  const existingContext = await getCandidateContext(db, profile.id);
+  const updatedContext = existingContext
+    ? await updateCandidateContext(db, existingContext.id, payload)
+    : await createCandidateContext(db, profile.id, payload);
+
+  return c.json(updatedContext);
 });
 
 app.get("/api/companies", async (c) => {

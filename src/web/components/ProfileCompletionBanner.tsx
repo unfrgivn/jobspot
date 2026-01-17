@@ -19,29 +19,44 @@ export function ProfileCompletionBanner() {
     const checkCompletion = async () => {
       try {
         const [profileRes, contextRes] = await Promise.all([
-          fetch("/api/profile"),
-          fetch("/api/candidate-context")
+          fetch("/api/profile", {
+            credentials: "include",
+            headers: { Accept: "application/json" },
+          }),
+          fetch("/api/candidate-context", {
+            credentials: "include",
+            headers: { Accept: "application/json" },
+          }),
         ]);
 
-        let profileIncomplete = false;
-        let contextIncomplete = false;
+        const safeJson = async <T,>(response: Response): Promise<T | null> => {
+          const contentType = response.headers.get("content-type") ?? "";
+          if (!contentType.includes("application/json")) {
+            return null;
+          }
+
+          try {
+            return (await response.json()) as T;
+          } catch {
+            return null;
+          }
+        };
+
+        let profileIncomplete = true;
+        let contextIncomplete = true;
 
         if (profileRes.ok) {
-          const profile = await profileRes.json() as UserProfile;
-          if (!profile || !profile.resume_text || profile.resume_text.trim() === "") {
-            profileIncomplete = true;
+          const profile = await safeJson<UserProfile>(profileRes);
+          if (profile?.resume_text?.trim()) {
+            profileIncomplete = false;
           }
-        } else {
-          profileIncomplete = true;
         }
 
         if (contextRes.ok) {
-          const context = await contextRes.json() as CandidateContext;
-          if (!context || !context.full_context || context.full_context.trim() === "") {
-            contextIncomplete = true;
+          const context = await safeJson<CandidateContext>(contextRes);
+          if (context?.full_context?.trim()) {
+            contextIncomplete = false;
           }
-        } else {
-          contextIncomplete = true;
         }
 
         if (profileIncomplete || contextIncomplete) {
