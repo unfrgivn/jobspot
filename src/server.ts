@@ -511,8 +511,13 @@ app.post("/api/profile/:id/resume", async (c) => {
   let resumeText: string;
 
   if (extension === "pdf") {
-    const buffer = Buffer.from(await entry.arrayBuffer());
-    resumeText = await extractTextFromPDF(buffer);
+    try {
+      const buffer = Buffer.from(await entry.arrayBuffer());
+      resumeText = await extractTextFromPDF(buffer);
+    } catch (error) {
+      console.error("Resume PDF parse failed:", error);
+      return c.json({ error: "Failed to parse PDF resume" }, 400);
+    }
   } else if (extension === "txt") {
     resumeText = await entry.text();
   } else {
