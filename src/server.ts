@@ -501,20 +501,20 @@ app.post("/api/profile/:id/resume", async (c) => {
   }
 
   const formData = await c.req.raw.formData();
-  const file = formData.get("file") ?? formData.get("resume");
-  if (!(file instanceof File)) {
+  const entry = formData.get("file") ?? formData.get("resume");
+  if (!entry || typeof entry === "string") {
     return c.json({ error: "Resume file is required" }, 400);
   }
 
-  const filename = file.name || "resume";
+  const filename = entry.name || "resume";
   const extension = filename.split(".").pop()?.toLowerCase();
   let resumeText: string;
 
   if (extension === "pdf") {
-    const buffer = Buffer.from(await file.arrayBuffer());
+    const buffer = Buffer.from(await entry.arrayBuffer());
     resumeText = await extractTextFromPDF(buffer);
   } else if (extension === "txt") {
-    resumeText = await file.text();
+    resumeText = await entry.text();
   } else {
     return c.json({ error: "Unsupported file type. Upload a PDF or TXT." }, 400);
   }
