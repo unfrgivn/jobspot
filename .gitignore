@@ -3,6 +3,8 @@ node_modules/
 
 # Build output
 dist/
+dist-server/*
+!dist-server/server.d.ts
 *.tsbuildinfo
 
 # Workspace data (DB is local, not committed)
@@ -43,3 +45,4 @@ Thumbs.db
 *.sqlite-wal
 *.sqlite-shm
 *.db
+.vercel

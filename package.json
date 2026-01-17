@@ -14,7 +14,8 @@
     "web": "bun run src/server.ts",
     "dev": "bun run --watch src/server.ts",
     "dev:frontend": "bunx vite",
-    "build": "bunx vite build",
+    "build": "bun run build:server && bunx vite build",
+    "build:server": "bun build src/server.ts --outdir dist-server --target node --format esm",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },
