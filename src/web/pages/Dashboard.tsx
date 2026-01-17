@@ -48,6 +48,30 @@ const normalizeDbTimestamp = (value: string) => {
 
 const parseUTCDate = (dateString: string) => new Date(normalizeDbTimestamp(dateString));
 
+const parseJsonResponse = async <T,>(response: Response, url: string): Promise<T> => {
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    const text = await response.text();
+    throw new Error(`Expected JSON from ${url}, got ${contentType || "unknown"}: ${text.slice(0, 120)}`);
+  }
+
+  const payload = (await response.json()) as T;
+  if (!response.ok) {
+    const message =
+      typeof payload === "object" && payload !== null && "error" in payload
+        ? String((payload as { error?: string }).error || "")
+        : "";
+    throw new Error(message || `Request failed with ${response.status}`);
+  }
+
+  return payload;
+};
+
+const fetchJson = async <T,>(url: string): Promise<T> => {
+  const response = await fetch(url);
+  return parseJsonResponse<T>(response, url);
+};
+
 interface PipelineStats {
   wishlist: number;
   applied: number;
@@ -143,25 +167,85 @@ export function Dashboard() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    Promise.all([
-      fetch("/api/stats").then((r) => r.json() as Promise<PipelineStats>),
-      fetch("/api/tasks?status=pending").then((r) => r.json() as Promise<Task[]>),
-      fetch("/api/applications?limit=5").then((r) => r.json() as Promise<Application[]>),
-      fetch("/api/interviews/upcoming").then((r) => r.json() as Promise<UpcomingInterview[]>),
-      fetch("/api/calendar/events").then((r) => r.json() as Promise<{ events: CalendarEvent[]; connected: boolean }>),
-      fetch("/api/roles?status=active").then((r) => r.json() as Promise<RoleOption[]>),
-    ])
-      .then(([statsData, tasksData, appsData, interviewsData, calendarData, rolesData]) => {
-        setStats(statsData);
-        setTasks(tasksData.slice(0, 5));
-        setRecentApps(appsData.slice(0, 5));
-        setUpcomingInterviews(interviewsData.slice(0, 5));
-        setCalendarEvents(calendarData.events || []);
-        setCalendarConnected(calendarData.connected || false);
-        setRoles(rolesData || []);
-      })
-      .finally(() => setLoading(false));
-  }, []);
+    let active = true;
+
+    const loadDashboard = async () => {
+      const results = await Promise.allSettled([
+        fetchJson<PipelineStats>("/api/stats"),
+        fetchJson<Task[]>("/api/tasks?status=pending"),
+        fetchJson<Application[]>("/api/applications?limit=5"),
+        fetchJson<UpcomingInterview[]>("/api/interviews/upcoming"),
+        fetchJson<{ events: CalendarEvent[]; connected: boolean }>("/api/calendar/events"),
+        fetchJson<RoleOption[]>("/api/roles?status=active"),
+      ]);
+
+      if (!active) return;
+
+      let hadError = false;
+      const [statsResult, tasksResult, appsResult, interviewsResult, calendarResult, rolesResult] = results;
+
+      if (statsResult.status === "fulfilled") {
+        setStats(statsResult.value);
+      } else {
+        hadError = true;
+        console.error("Failed to load stats:", statsResult.reason);
+      }
+
+      if (tasksResult.status === "fulfilled") {
+        setTasks(tasksResult.value.slice(0, 5));
+      } else {
+        hadError = true;
+        setTasks([]);
+        console.error("Failed to load tasks:", tasksResult.reason);
+      }
+
+      if (appsResult.status === "fulfilled") {
+        setRecentApps(appsResult.value.slice(0, 5));
+      } else {
+        hadError = true;
+        setRecentApps([]);
+        console.error("Failed to load applications:", appsResult.reason);
+      }
+
+      if (interviewsResult.status === "fulfilled") {
+        setUpcomingInterviews(interviewsResult.value.slice(0, 5));
+      } else {
+        hadError = true;
+        setUpcomingInterviews([]);
+        console.error("Failed to load interviews:", interviewsResult.reason);
+      }
+
+      if (calendarResult.status === "fulfilled") {
+        setCalendarEvents(calendarResult.value.events || []);
+        setCalendarConnected(calendarResult.value.connected || false);
+      } else {
+        hadError = true;
+        setCalendarEvents([]);
+        setCalendarConnected(false);
+        console.error("Failed to load calendar:", calendarResult.reason);
+      }
+
+      if (rolesResult.status === "fulfilled") {
+        setRoles(rolesResult.value || []);
+      } else {
+        hadError = true;
+        setRoles([]);
+        console.error("Failed to load roles:", rolesResult.reason);
+      }
+
+      if (hadError) {
+        addToast({ title: "Some dashboard data failed to load", variant: "error" });
+      }
+    };
+
+    loadDashboard().finally(() => {
+      if (active) setLoading(false);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [addToast]);
 
   const handleLinkEvent = async (event: CalendarEvent, roleId: string) => {
     setLinkingEventId(event.id);

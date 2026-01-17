@@ -909,6 +909,45 @@ app.get("/api/stats", async (c) => {
   return c.json(stats);
 });
 
+app.get("/api/tasks", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const status = c.req.query("status");
+  const pending = c.req.query("pending");
+  const wantsPending = status === "pending" || pending === "true";
+  const tasks = wantsPending
+    ? await getPendingTasks(db, authUser.id)
+    : await getAllTasks(db, authUser.id);
+
+  if (status && !wantsPending) {
+    return c.json(tasks.filter((task) => task.status === status));
+  }
+
+  return c.json(tasks);
+});
+
+app.post("/api/tasks", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const body = await c.req.json();
+  const task = await createTask(db, authUser.id, body);
+  return c.json(task, 201);
+});
+
+app.put("/api/tasks/:id", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const body = await c.req.json();
+  const task = await updateTask(db, authUser.id, c.req.param("id"), body);
+  return c.json(task);
+});
+
 app.get("/api/roles/:id/artifacts", async (c) => {
   await ensureWorkspaceRoot();
   const authUser = c.get("authUser");

@@ -50,6 +50,30 @@ const normalizeDbTimestamp = (value: string) => {
 
 const parseUTCDate = (dateString: string) => new Date(normalizeDbTimestamp(dateString));
 
+const parseJsonResponse = async <T,>(response: Response, url: string): Promise<T> => {
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    const text = await response.text();
+    throw new Error(`Expected JSON from ${url}, got ${contentType || "unknown"}: ${text.slice(0, 120)}`);
+  }
+
+  const payload = (await response.json()) as T;
+  if (!response.ok) {
+    const message =
+      typeof payload === "object" && payload !== null && "error" in payload
+        ? String((payload as { error?: string }).error || "")
+        : "";
+    throw new Error(message || `Request failed with ${response.status}`);
+  }
+
+  return payload;
+};
+
+const fetchJson = async <T,>(url: string): Promise<T> => {
+  const response = await fetch(url);
+  return parseJsonResponse<T>(response, url);
+};
+
 interface TaskWithContext {
   id: string;
   application_id: string | null;
@@ -77,9 +101,14 @@ export function Tasks() {
 
   const fetchTasks = async () => {
     const pending = filter === "pending" ? "?pending=true" : "";
-    const res = await fetch(`/api/tasks${pending}`);
-    const data = await res.json();
-    setTasks(data);
+    try {
+      const data = await fetchJson<TaskWithContext[]>(`/api/tasks${pending}`);
+      setTasks(data);
+    } catch (error) {
+      console.error("Failed to load tasks:", error);
+      addToast({ title: "Failed to load tasks", variant: "error" });
+      setTasks([]);
+    }
   };
 
   useEffect(() => {
