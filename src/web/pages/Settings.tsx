@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
+import * as React from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import { Badge } from "../components/ui/badge";
 import { 
@@ -26,6 +27,14 @@ import { Label } from "../components/ui/label";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { useToast } from "../components/ui/toast";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../components/ui/dialog";
 import { cn } from "../lib/utils";
 
 interface DoctorCheck {
@@ -137,6 +146,11 @@ export function Settings() {
   const [connectingCalendar, setConnectingCalendar] = useState(false);
   const [disconnectingCalendar, setDisconnectingCalendar] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
+  const [restoreDialogOpen, setRestoreDialogOpen] = useState(false);
+  const [pendingRestoreFile, setPendingRestoreFile] = useState<File | null>(null);
+  const [isRestoring, setIsRestoring] = useState(false);
+  const restoreFileInputRef = useRef<HTMLInputElement>(null);
+
   const [formData, setFormData] = useState({
     full_name: "",
     email: "",
@@ -372,6 +386,34 @@ export function Settings() {
     } catch (error) {
       console.error("Failed to disconnect calendar:", error);
       addToast({ title: "Failed to disconnect calendar", variant: "error" });
+    }
+  };
+
+  const handleRestoreConfirm = async () => {
+    if (!pendingRestoreFile) return;
+    
+    setIsRestoring(true);
+    const formData = new FormData();
+    formData.append("file", pendingRestoreFile);
+    
+    try {
+      const res = await fetch("/api/restore", {
+        method: "POST",
+        body: formData,
+      });
+      const data = await res.json();
+      
+      if (res.ok) {
+        addToast({ title: "Data restored successfully", description: "The page will now reload.", variant: "success" });
+        setRestoreDialogOpen(false);
+        setTimeout(() => window.location.reload(), 1500);
+      } else {
+        addToast({ title: "Restore failed", description: data.error, variant: "error" });
+        setIsRestoring(false);
+      }
+    } catch {
+      addToast({ title: "Restore failed", description: "Network error", variant: "error" });
+      setIsRestoring(false);
     }
   };
 
@@ -954,9 +996,9 @@ export function Settings() {
             </CardHeader>
             <CardContent className="space-y-6">
               <div className="p-4 rounded-lg border bg-slate-50">
-                <h3 className="font-semibold text-slate-900 mb-2">Download Backup</h3>
+                <h3 className="font-semibold text-slate-900 mb-2">Download User Data</h3>
                 <p className="text-sm text-slate-600 mb-4">
-                  Export your entire database including all roles, applications, research, and settings.
+                  Export your personal data including profile, context, roles, and pipelines to a JSON file.
                 </p>
                 <a
                   href="/api/backup"
@@ -969,46 +1011,25 @@ export function Settings() {
               </div>
 
               <div className="p-4 rounded-lg border bg-amber-50 border-amber-200">
-                <h3 className="font-semibold text-slate-900 mb-2">Restore from Backup</h3>
+                <h3 className="font-semibold text-slate-900 mb-2">Restore User Data</h3>
                 <p className="text-sm text-slate-600 mb-2">
-                  Upload a previously downloaded backup file to restore your data.
+                  Upload a previously downloaded JSON backup file to restore your data.
                 </p>
                 <p className="text-xs text-amber-700 mb-4">
-                  Warning: This will replace all current data. A backup of your current database will be created automatically.
+                  Warning: This will replace your current user data (profile, context, roles, tasks, pipeline).
                 </p>
                 <input
                   type="file"
-                  accept=".sqlite"
+                  accept=".json,application/json"
                   id="restore-file"
                   className="hidden"
-                  onChange={async (e) => {
+                  ref={restoreFileInputRef}
+                  onChange={(e) => {
                     const file = e.target.files?.[0];
                     if (!file) return;
                     
-                    if (!confirm("Are you sure you want to restore from this backup? This will replace all current data.")) {
-                      e.target.value = "";
-                      return;
-                    }
-                    
-                    const formData = new FormData();
-                    formData.append("backup", file);
-                    
-                    try {
-                      const res = await fetch("/api/restore", {
-                        method: "POST",
-                        body: formData,
-                      });
-                      const data = await res.json();
-                      
-                      if (res.ok) {
-                        addToast({ title: "Database restored successfully", description: "The page will now reload.", variant: "success" });
-                        setTimeout(() => window.location.reload(), 1500);
-                      } else {
-                        addToast({ title: "Restore failed", description: data.error, variant: "error" });
-                      }
-                    } catch {
-                      addToast({ title: "Restore failed", description: "Network error", variant: "error" });
-                    }
+                    setPendingRestoreFile(file);
+                    setRestoreDialogOpen(true);
                     
                     e.target.value = "";
                   }}
@@ -1020,6 +1041,49 @@ export function Settings() {
                   <FileText className="h-4 w-4" />
                   Choose Backup File
                 </label>
+
+                <Dialog open={restoreDialogOpen} onOpenChange={setRestoreDialogOpen}>
+                  <DialogContent>
+                    <DialogHeader>
+                      <DialogTitle className="flex items-center gap-2 text-amber-600">
+                        <AlertCircle className="h-5 w-5" />
+                        Warning: Destructive Action
+                      </DialogTitle>
+                      <DialogDescription className="pt-2 text-slate-700">
+                        Are you sure you want to restore from this backup?
+                        <br /><br />
+                        <span className="font-semibold text-red-600">This will completely replace all your current data</span> (profile, context, roles, tasks, pipeline) with the data from the backup file. This action cannot be undone.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter className="gap-2 sm:gap-0">
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          setRestoreDialogOpen(false);
+                          setPendingRestoreFile(null);
+                        }}
+                        disabled={isRestoring}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        onClick={handleRestoreConfirm}
+                        disabled={isRestoring}
+                        className="bg-red-600 hover:bg-red-700"
+                      >
+                        {isRestoring ? (
+                          <>
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                            Restoring...
+                          </>
+                        ) : (
+                          "Yes, Replace Everything"
+                        )}
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
               </div>
             </CardContent>
           </Card>
@@ -1040,17 +1104,6 @@ export function Settings() {
                   A personalized career copilot designed to help you manage your job search pipeline, 
                   generate tailored cover letters, and track your applications with intelligent insights.
                 </p>
-              </div>
-              
-              <div className="grid grid-cols-2 gap-4 text-xs">
-                <div className="p-3 rounded border bg-white">
-                  <p className="font-semibold text-slate-900 mb-1">Tech Stack</p>
-                  <p className="text-muted-foreground">Bun, Hono, React, Tailwind</p>
-                </div>
-                <div className="p-3 rounded border bg-white">
-                  <p className="font-semibold text-slate-900 mb-1">AI Engine</p>
-                  <p className="text-muted-foreground">Google Gemini 2.0 Flash</p>
-                </div>
               </div>
             </CardContent>
           </Card>

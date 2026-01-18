@@ -7,7 +7,14 @@ import { streamSSE } from "hono/streaming";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { randomUUID } from "crypto";
 import { findRoot } from "./workspace";
-import { getDb, runMigrations } from "./db";
+import {
+  getDb,
+  runMigrations,
+  exportUserBackup,
+  restoreUserBackup,
+  type BackupData,
+  type BackupPayload,
+} from "./db";
 import { extractTextFromPDF } from "./lib/pdf-parser";
 import {
   getAllCompanies,
@@ -1174,15 +1181,108 @@ app.delete("/api/questions/:questionId", async (c) => {
   return c.json({ success: true });
 });
 
-app.get("/api/backup", async (c) => {
-  await ensureWorkspaceRoot();
-  return c.json({ error: "Backup is not supported for Postgres. Use pg_dump." }, 501);
-});
+  const isBackupData = (value: unknown): value is BackupData => {
+    if (!isRecord(value)) {
+      return false;
+    }
 
-app.post("/api/restore", async (c) => {
-  await ensureWorkspaceRoot();
-  return c.json({ error: "Restore is not supported for Postgres. Use psql to restore." }, 501);
-});
+    return (
+      Array.isArray(value.user_profile) &&
+      Array.isArray(value.candidate_context) &&
+      Array.isArray(value.companies) &&
+      Array.isArray(value.roles) &&
+      Array.isArray(value.applications) &&
+      Array.isArray(value.contacts) &&
+      Array.isArray(value.interviews) &&
+      Array.isArray(value.artifacts) &&
+      Array.isArray(value.tasks) &&
+      Array.isArray(value.events) &&
+      Array.isArray(value.role_research) &&
+      Array.isArray(value.application_questions)
+    );
+  };
+
+  const parseBackupPayload = (value: unknown): BackupPayload => {
+    if (!isRecord(value)) {
+      throw new Error("Backup file must be a JSON object.");
+    }
+
+    const dataCandidate = isBackupData(value.data) ? value.data : value;
+    if (!isBackupData(dataCandidate)) {
+      throw new Error("Backup data is missing required sections.");
+    }
+
+    return {
+      version: 1,
+      exported_at: typeof value.exported_at === "string" ? value.exported_at : new Date().toISOString(),
+      user_id: typeof value.user_id === "string" ? value.user_id : "",
+      data: dataCandidate,
+    };
+  };
+
+  app.get("/api/backup", async (c) => {
+    ensureWorkspaceRoot();
+
+    const user = c.get("authUser");
+    if (!user) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+
+    const db = getDb();
+    const data = await exportUserBackup(db, user.id);
+
+    const payload: BackupPayload = {
+      version: 1,
+      exported_at: new Date().toISOString(),
+      user_id: user.id,
+      data,
+    };
+
+    return c.json(payload);
+  });
+
+  app.post("/api/restore", async (c) => {
+    ensureWorkspaceRoot();
+
+    const user = c.get("authUser");
+    if (!user) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+
+    const contentType = c.req.header("content-type") ?? "";
+    let payloadInput: unknown;
+
+    if (contentType.includes("application/json")) {
+      payloadInput = await c.req.json();
+    } else {
+      const formData = await c.req.raw.formData();
+      const entry = formData.get("file");
+
+      if (!(entry instanceof File)) {
+        return c.json({ error: "Backup file is required." }, 400);
+      }
+
+      try {
+        payloadInput = JSON.parse(await entry.text());
+      } catch {
+        return c.json({ error: "Backup file must contain valid JSON." }, 400);
+      }
+    }
+
+    let payload: BackupPayload;
+
+    try {
+      payload = parseBackupPayload(payloadInput);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : "Invalid backup file." }, 400);
+    }
+
+    const db = getDb();
+    await restoreUserBackup(db, user.id, payload.data);
+
+    return c.json({ ok: true });
+  });
+
 
 app.post("/api/companies/:id/research", async (c) => {
   const { id } = c.req.param();

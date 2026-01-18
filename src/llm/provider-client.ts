@@ -102,19 +102,65 @@ async function parseErrorResponse(response: Response): Promise<string> {
 }
 
 function extractJsonString(text: string): string | null {
-  const objectMatch = text.match(/\{[\s\S]*\}/);
-  const arrayMatch = text.match(/\[[\s\S]*\]/);
-
-  if (objectMatch && arrayMatch) {
-    const objectIndex = objectMatch.index ?? 0;
-    const arrayIndex = arrayMatch.index ?? 0;
-    return objectIndex <= arrayIndex ? objectMatch[0] : arrayMatch[0];
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenceMatch?.[1]) {
+    return fenceMatch[1];
   }
 
-  return objectMatch?.[0] ?? arrayMatch?.[0] ?? null;
+  const startIndex = text.search(/[\[{]/);
+  if (startIndex === -1) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escapeNext = false;
+  let startChar: "{" | "[" | null = null;
+
+  for (let i = startIndex; i < text.length; i += 1) {
+    const char = text[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escapeNext = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (char === "{" || char === "[") {
+      if (depth === 0) {
+        startChar = char;
+      }
+      depth += 1;
+    }
+
+    if (char === "}" || char === "]") {
+      depth -= 1;
+      if (depth === 0 && startChar) {
+        return text.slice(startIndex, i + 1);
+      }
+      if (depth < 0) {
+        break;
+      }
+    }
+  }
+
+  return null;
 }
 
-function parseJson(text: string): unknown {
+export function parseJson(text: string): unknown {
   const trimmed = text.trim();
   if (!trimmed) {
     throw new Error("Empty JSON response");
@@ -128,8 +174,14 @@ function parseJson(text: string): unknown {
     if (!extracted) {
       throw new Error("Failed to parse JSON from response");
     }
-    const parsed: unknown = JSON.parse(extracted);
-    return parsed;
+
+    const normalized = extracted.replace(/,\s*([}\]])/g, "$1").trim();
+    try {
+      const parsed: unknown = JSON.parse(normalized);
+      return parsed;
+    } catch {
+      throw new Error("Failed to parse JSON from response");
+    }
   }
 }
 
