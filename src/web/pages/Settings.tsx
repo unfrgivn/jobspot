@@ -126,6 +126,7 @@ export function Settings() {
     technical_expertise?: string;
     impact_highlights?: string;
     career_trajectory?: string;
+    full_context?: string;
   }
   const [candidateContext, setCandidateContext] = useState<CandidateContext | null>(null);
   const [refreshingContext, setRefreshingContext] = useState(false);
@@ -163,6 +164,7 @@ export function Settings() {
       if (response.ok) {
         const updated = await response.json();
         setProfile(updated);
+        window.dispatchEvent(new Event("candidate-context-updated"));
       } else {
         console.error("Failed to upload resume");
         addToast({ title: "Failed to upload resume", variant: "error" });
@@ -223,6 +225,7 @@ export function Settings() {
       if (response.ok) {
         const data = await response.json();
         setCandidateContext(data);
+        window.dispatchEvent(new Event("candidate-context-updated"));
       } else {
         console.error("Failed to refresh candidate context");
         addToast({ title: "Failed to refresh candidate context", variant: "error" });
@@ -253,6 +256,7 @@ export function Settings() {
         setSaveStatus("success");
         addToast({ title: "Profile saved successfully", variant: "success" });
         setTimeout(() => setSaveStatus("idle"), 3000);
+        window.dispatchEvent(new Event("candidate-context-updated"));
       } else {
         console.error("Failed to save profile");
         setSaveStatus("error");
@@ -637,12 +641,12 @@ export function Settings() {
                   {refreshingContext ? (
                     <>
                       <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      {candidateContext ? 'Refreshing...' : 'Generating...'}
+                      {candidateContext?.full_context ? 'Refreshing...' : 'Generating...'}
                     </>
                   ) : (
                     <>
                       <RefreshCw className="h-4 w-4 mr-2" />
-                      {candidateContext ? 'Refresh Context' : 'Generate Context'}
+                      {candidateContext?.full_context ? 'Refresh Context' : 'Generate Context'}
                     </>
                   )}
                 </Button>

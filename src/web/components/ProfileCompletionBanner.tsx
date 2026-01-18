@@ -59,9 +59,7 @@ export function ProfileCompletionBanner() {
           }
         }
 
-        if (profileIncomplete || contextIncomplete) {
-          setVisible(true);
-        }
+        setVisible(profileIncomplete || contextIncomplete);
       } catch (error) {
         console.error("Failed to check profile completion", error);
       } finally {
@@ -70,6 +68,13 @@ export function ProfileCompletionBanner() {
     };
 
     checkCompletion();
+
+    const handleUpdate = () => checkCompletion();
+    window.addEventListener("candidate-context-updated", handleUpdate);
+    
+    return () => {
+      window.removeEventListener("candidate-context-updated", handleUpdate);
+    };
   }, []);
 
   if (loading || !visible) return null;
@@ -87,7 +92,7 @@ export function ProfileCompletionBanner() {
                 Your profile is incomplete
               </p>
               <p className="text-xs text-amber-700 hidden sm:block">
-                Complete your profile and candidate context to get the best AI results.
+                Complete your profile and update user context to get the best AI results.
               </p>
             </div>
           </div>
