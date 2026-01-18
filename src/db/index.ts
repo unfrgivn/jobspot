@@ -26,6 +26,7 @@ export function getDb(databaseUrl?: string): DbClient {
       max: 1,
       idle_timeout: 30,
       connect_timeout: 30,
+      onnotice: () => {},
     });
   }
 
