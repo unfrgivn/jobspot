@@ -1331,46 +1331,55 @@ app.delete("/api/questions/:questionId", async (c) => {
 
 
 app.post("/api/companies/:id/research", async (c) => {
-  const { id } = c.req.param();
-  const root = await ensureWorkspaceRoot();
-  const authUser = c.get("authUser");
-  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
-  const db = getDb();
-  const { apiKey, error, provider, model } = resolveLlmCredentials(root);
+  try {
+    const { id } = c.req.param();
+    const root = await ensureWorkspaceRoot();
+    const authUser = c.get("authUser");
+    if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+    const db = getDb();
+    const { apiKey, error, provider, model } = resolveLlmCredentials(root);
 
-  if (!apiKey || !provider || !model) {
-    return c.json({ error: error ?? "LLM API key not configured" }, 500);
+    if (!apiKey || !provider || !model) {
+      const message = error ?? "LLM API key not configured";
+      console.error("LLM credentials missing:", message);
+      return c.json({ error: message }, 500);
+    }
+
+    const company = await getCompanyById(db, authUser.id, id);
+    if (!company) {
+      return c.json({ error: "Company not found" }, 404);
+    }
+
+    const result = await researchCompany(provider, apiKey, model, company.name);
+
+    if (!result) {
+      return c.json({ error: "Failed to research company" }, 500);
+    }
+
+    const fundingStatus = result.funding_status.type ? JSON.stringify(result.funding_status) : null;
+    const industry = result.industry.primary ? JSON.stringify(result.industry) : null;
+    const companySize = result.company_size.employees_estimate ? JSON.stringify(result.company_size) : null;
+
+    const updated = await updateCompany(db, authUser.id, id, {
+      website: result.website || company.website || undefined,
+      headquarters:
+        result.headquarters.city && result.headquarters.country
+          ? `${result.headquarters.city}, ${result.headquarters.state_province || ""} ${result.headquarters.country}`.trim()
+          : company.headquarters || undefined,
+      description: result.description || company.description || undefined,
+      industry: industry || undefined,
+      funding_status: fundingStatus || undefined,
+      company_size: companySize || undefined,
+      established_date: result.established_date || undefined,
+      research_sources: result.sources.length > 0 ? JSON.stringify(result.sources) : undefined,
+    });
+
+    return c.json({ company: updated, research: result });
+  } catch (error) {
+    console.error("Failed to research company:", error);
+    const message = error instanceof Error ? error.message : "Failed to research company";
+    return c.json({ error: message }, 500);
   }
-
-  const company = await getCompanyById(db, authUser.id, id);
-  if (!company) {
-    return c.json({ error: "Company not found" }, 404);
-  }
-
-  const result = await researchCompany(provider, apiKey, model, company.name);
-
-  if (!result) {
-    return c.json({ error: "Failed to research company" }, 500);
-  }
-
-  const fundingStatus = result.funding_status.type ? JSON.stringify(result.funding_status) : null;
-  const industry = result.industry.primary ? JSON.stringify(result.industry) : null;
-  const companySize = result.company_size.employees_estimate ? JSON.stringify(result.company_size) : null;
-
-  const updated = await updateCompany(db, authUser.id, id, {
-    website: result.website || company.website || undefined,
-    headquarters: result.headquarters.city && result.headquarters.country 
-      ? `${result.headquarters.city}, ${result.headquarters.state_province || ''} ${result.headquarters.country}`.trim()
-      : company.headquarters || undefined,
-    description: result.description || company.description || undefined,
-    industry: industry || undefined,
-    funding_status: fundingStatus || undefined,
-    company_size: companySize || undefined,
-    established_date: result.established_date || undefined,
-    research_sources: result.sources.length > 0 ? JSON.stringify(result.sources) : undefined,
-  });
-
-  return c.json({ company: updated, research: result });
 });
 
 app.get("/api/interviews/upcoming", async (c) => {

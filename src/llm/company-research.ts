@@ -1,5 +1,5 @@
 import type { LlmProvider } from "../config";
-import { generateJson } from "./provider-client";
+import { generateJson, generateText, parseJson } from "./provider-client";
 
 export interface CompanyResearchResult {
   company_name: string;
@@ -41,6 +41,43 @@ function getNullableNumber(value: unknown): number | null {
 
 function getStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function buildCompanyResearchResult(parsed: unknown): CompanyResearchResult | null {
+  if (!isRecord(parsed)) {
+    return null;
+  }
+
+  const industry = isRecord(parsed.industry) ? parsed.industry : {};
+  const funding = isRecord(parsed.funding_status) ? parsed.funding_status : {};
+  const size = isRecord(parsed.company_size) ? parsed.company_size : {};
+  const headquarters = isRecord(parsed.headquarters) ? parsed.headquarters : {};
+
+  return {
+    company_name: getNullableString(parsed.company_name) ?? "",
+    website: getNullableString(parsed.website),
+    industry: {
+      primary: getNullableString(industry.primary),
+      secondary: getStringArray(industry.secondary),
+    },
+    funding_status: {
+      type: getNullableString(funding.type),
+      last_known_round: getNullableString(funding.last_known_round),
+      last_known_round_year: getNullableNumber(funding.last_known_round_year),
+    },
+    company_size: {
+      employees_estimate: getNullableString(size.employees_estimate),
+      source: getNullableString(size.source),
+    },
+    established_date: getNullableString(parsed.established_date),
+    headquarters: {
+      city: getNullableString(headquarters.city),
+      state_province: getNullableString(headquarters.state_province),
+      country: getNullableString(headquarters.country),
+    },
+    description: getNullableString(parsed.description),
+    sources: getStringArray(parsed.sources),
+  };
 }
 
 export async function researchCompany(
@@ -109,52 +146,38 @@ established_date should be in ISO format (YYYY or YYYY-MM-DD) when possible.
 
 sources should be a list of URLs used to verify the information.`;
 
+  const request = {
+    provider,
+    apiKey,
+    model,
+    prompt,
+    temperature: 0.3,
+    maxTokens: 2048,
+  };
+
   try {
-    const parsed = await generateJson({
-      provider,
-      apiKey,
-      model,
-      prompt,
-      temperature: 0.3,
-      maxTokens: 2048,
-    });
-
-    if (!isRecord(parsed)) {
-      return null;
+    const parsed = await generateJson(request);
+    const result = buildCompanyResearchResult(parsed);
+    if (result) {
+      return result;
     }
-
-    const industry = isRecord(parsed.industry) ? parsed.industry : {};
-    const funding = isRecord(parsed.funding_status) ? parsed.funding_status : {};
-    const size = isRecord(parsed.company_size) ? parsed.company_size : {};
-    const headquarters = isRecord(parsed.headquarters) ? parsed.headquarters : {};
-
-    return {
-      company_name: getNullableString(parsed.company_name) ?? "",
-      website: getNullableString(parsed.website),
-      industry: {
-        primary: getNullableString(industry.primary),
-        secondary: getStringArray(industry.secondary),
-      },
-      funding_status: {
-        type: getNullableString(funding.type),
-        last_known_round: getNullableString(funding.last_known_round),
-        last_known_round_year: getNullableNumber(funding.last_known_round_year),
-      },
-      company_size: {
-        employees_estimate: getNullableString(size.employees_estimate),
-        source: getNullableString(size.source),
-      },
-      established_date: getNullableString(parsed.established_date),
-      headquarters: {
-        city: getNullableString(headquarters.city),
-        state_province: getNullableString(headquarters.state_province),
-        country: getNullableString(headquarters.country),
-      },
-      description: getNullableString(parsed.description),
-      sources: getStringArray(parsed.sources),
-    };
   } catch (error) {
-    console.error("Error researching company:", error);
-    return null;
+    console.error("Error researching company (json):", error);
   }
+
+  try {
+    const fallbackText = await generateText({
+      ...request,
+      system: "Return only valid JSON.",
+    });
+    const parsedFallback = parseJson(fallbackText);
+    const result = buildCompanyResearchResult(parsedFallback);
+    if (result) {
+      return result;
+    }
+  } catch (error) {
+    console.error("Error researching company (fallback):", error);
+  }
+
+  return null;
 }
