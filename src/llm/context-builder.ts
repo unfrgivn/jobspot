@@ -119,9 +119,15 @@ export async function buildCandidateContext(
 }> {
   const { profile, linkedinData, portfolioData } = sources;
   
-  const experienceData: unknown = profile.experience_json 
-    ? JSON.parse(profile.experience_json) 
-    : null;
+  let experienceData: unknown = null;
+  if (profile.experience_json) {
+    try {
+      experienceData = JSON.parse(profile.experience_json);
+    } catch (error) {
+      console.error("Failed to parse experience_json:", error);
+      experienceData = null;
+    }
+  }
   
   const prompt = `You are a career narrative expert. Synthesize the following information about a candidate into a comprehensive professional profile.
 

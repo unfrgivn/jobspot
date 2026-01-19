@@ -241,8 +241,13 @@ export function Settings() {
         setCandidateContext(data);
         window.dispatchEvent(new Event("candidate-context-updated"));
       } else {
-        console.error("Failed to refresh candidate context");
-        addToast({ title: "Failed to refresh candidate context", variant: "error" });
+        const errorBody = await response.json().catch(() => null);
+        const message =
+          errorBody && typeof errorBody === "object" && "error" in errorBody
+            ? String(errorBody.error)
+            : "Failed to refresh candidate context";
+        console.error("Failed to refresh candidate context:", message);
+        addToast({ title: message, variant: "error" });
       }
     } catch (error) {
       console.error("Failed to refresh candidate context:", error);

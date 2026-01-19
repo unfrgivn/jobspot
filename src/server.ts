@@ -576,35 +576,43 @@ app.post("/api/candidate-context/refresh", async (c) => {
 
   const { apiKey, error, provider, model } = resolveLlmCredentials(root);
   if (!apiKey || !provider || !model) {
-    return c.json({ error: error ?? "LLM API key not configured" }, 500);
+    const message = error ?? "LLM API key not configured";
+    console.error("LLM credentials missing:", message);
+    return c.json({ error: message }, 500);
   }
 
-  const linkedinData = profile.linkedin_url
-    ? await scrapeLinkedInProfile(profile.linkedin_url)
-    : null;
-  const portfolioData = profile.portfolio_url
-    ? await scrapePortfolioSite(profile.portfolio_url)
-    : null;
+  try {
+    const linkedinData = profile.linkedin_url
+      ? await scrapeLinkedInProfile(profile.linkedin_url)
+      : null;
+    const portfolioData = profile.portfolio_url
+      ? await scrapePortfolioSite(profile.portfolio_url)
+      : null;
 
-  const synthesized = await buildCandidateContext(
-    { profile, linkedinData, portfolioData },
-    { provider, apiKey, model }
-  );
-  const timestamp = new Date().toISOString();
+    const synthesized = await buildCandidateContext(
+      { profile, linkedinData, portfolioData },
+      { provider, apiKey, model }
+    );
+    const timestamp = new Date().toISOString();
 
-  const payload = {
-    ...synthesized,
-    linkedin_scraped_at: linkedinData ? timestamp : null,
-    portfolio_scraped_at: portfolioData ? timestamp : null,
-    resume_parsed_at: profile.resume_text?.trim() ? timestamp : null,
-  };
+    const payload = {
+      ...synthesized,
+      linkedin_scraped_at: linkedinData ? timestamp : null,
+      portfolio_scraped_at: portfolioData ? timestamp : null,
+      resume_parsed_at: profile.resume_text?.trim() ? timestamp : null,
+    };
 
-  const existingContext = await getCandidateContext(db, profile.id);
-  const updatedContext = existingContext
-    ? await updateCandidateContext(db, existingContext.id, payload)
-    : await createCandidateContext(db, profile.id, payload);
+    const existingContext = await getCandidateContext(db, profile.id);
+    const updatedContext = existingContext
+      ? await updateCandidateContext(db, existingContext.id, payload)
+      : await createCandidateContext(db, profile.id, payload);
 
-  return c.json(updatedContext);
+    return c.json(updatedContext);
+  } catch (error) {
+    console.error("Failed to refresh candidate context:", error);
+    const message = error instanceof Error ? error.message : "Failed to refresh candidate context";
+    return c.json({ error: message }, 500);
+  }
 });
 
 app.get("/api/companies", async (c) => {
@@ -653,6 +661,18 @@ app.get("/api/roles/:id", async (c) => {
   const role = await getRoleWithDetails(db, authUser.id, c.req.param("id"));
   if (!role) return c.json({ error: "Role not found" }, 404);
   return c.json(role);
+});
+
+app.get("/api/roles/:id/research", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const roleId = c.req.param("id");
+  const role = await getRoleById(db, authUser.id, roleId);
+  if (!role) return c.json({ error: "Role not found" }, 404);
+  const research = await getResearchByRoleId(db, authUser.id, roleId);
+  return c.json(research ?? null);
 });
 
 app.post("/api/roles", async (c) => {
@@ -1025,6 +1045,18 @@ app.get("/api/applications/:id", async (c) => {
   return c.json(application);
 });
 
+app.get("/api/applications/:id/interviews", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const applicationId = c.req.param("id");
+  const application = await getApplicationById(db, authUser.id, applicationId);
+  if (!application) return c.json({ error: "Application not found" }, 404);
+  const interviews = await getInterviewsByApplication(db, authUser.id, applicationId);
+  return c.json(interviews);
+});
+
 app.put("/api/applications/:id", async (c) => {
   await ensureWorkspaceRoot();
   const authUser = c.get("authUser");
@@ -1125,6 +1157,20 @@ Return ONLY a JSON array with exactly 3 strings, no other text:
   }
 
   return c.json({ answers });
+});
+
+app.get("/api/roles/:roleId/questions", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
+  const roleId = c.req.param("roleId");
+  const role = await getRoleById(db, authUser.id, roleId);
+  if (!role) return c.json({ error: "Role not found" }, 404);
+
+  const questions = await getQuestionsByRoleId(db, authUser.id, roleId);
+  return c.json(questions);
 });
 
 app.post("/api/roles/:roleId/questions", async (c) => {

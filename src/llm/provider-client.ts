@@ -160,29 +160,53 @@ function extractJsonString(text: string): string | null {
   return null;
 }
 
+function normalizeJsonString(text: string): string {
+  return text
+    .replace(/[“”]/g, "\"")
+    .replace(/[‘’]/g, "'")
+    .replace(/,\s*([}\]])/g, "$1")
+    .trim();
+}
+
+function tryParseJson(text: string): unknown | null {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 export function parseJson(text: string): unknown {
   const trimmed = text.trim();
   if (!trimmed) {
     throw new Error("Empty JSON response");
   }
 
-  try {
-    const parsed: unknown = JSON.parse(trimmed);
-    return parsed;
-  } catch {
-    const extracted = extractJsonString(trimmed);
-    if (!extracted) {
-      throw new Error("Failed to parse JSON from response");
-    }
+  const direct = tryParseJson(trimmed);
+  if (direct !== null) {
+    return direct;
+  }
 
-    const normalized = extracted.replace(/,\s*([}\]])/g, "$1").trim();
-    try {
-      const parsed: unknown = JSON.parse(normalized);
-      return parsed;
-    } catch {
-      throw new Error("Failed to parse JSON from response");
+  const extracted = extractJsonString(trimmed);
+  if (!extracted) {
+    throw new Error("Failed to parse JSON from response");
+  }
+
+  const normalized = normalizeJsonString(extracted);
+  const normalizedParsed = tryParseJson(normalized);
+  if (normalizedParsed !== null) {
+    return normalizedParsed;
+  }
+
+  if (!normalized.includes("\"") && normalized.includes("'")) {
+    const singleNormalized = normalizeJsonString(normalized.replace(/'([^']*)'/g, '"$1"'));
+    const singleParsed = tryParseJson(singleNormalized);
+    if (singleParsed !== null) {
+      return singleParsed;
     }
   }
+
+  throw new Error("Failed to parse JSON from response");
 }
 
 async function* readSseDataLines(response: Response): AsyncGenerator<string> {
