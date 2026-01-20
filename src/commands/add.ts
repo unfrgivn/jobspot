@@ -264,7 +264,10 @@ export async function refreshRole(userId: string, roleId: string): Promise<{
 
     if (apiKey && scraped.description) {
       const { generateRoleResearch } = await import("./research");
-      await generateRoleResearch(userId, roleId);
+      await generateRoleResearch(userId, roleId, {
+        includeInterviewQuestions: false,
+        includeQuestionsToAsk: false,
+      });
       researchGenerated = true;
     }
   } catch (error) {

@@ -85,11 +85,12 @@ import {
 import { applyToRole } from "./commands/apply";
 import { addRole, refreshRole } from "./commands/add";
 import type { AddRoleOptions } from "./commands/add";
+import { generateRoleQuestionsToAsk } from "./commands/research";
 import { initWorkspace } from "./commands/init";
 import { generateCoverLetterStream } from "./llm/gemini";
 import { generateCompanyResearch } from "./llm/research";
 import { researchCompany } from "./llm/company-research";
-import { generateJson, generateText } from "./llm/provider-client";
+import { generateJson, generateText, parseJson } from "./llm/provider-client";
 import {
   loadConfig,
   loadSecrets,
@@ -755,6 +756,21 @@ app.post("/api/roles/:id/refresh", async (c) => {
   }
 });
 
+app.post("/api/roles/:id/questions-to-ask", async (c) => {
+  try {
+    await ensureWorkspaceRoot();
+    const authUser = c.get("authUser");
+    if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+    const roleId = c.req.param("id");
+    const body = await c.req.json<{ guidance?: string }>();
+    const questionsToAsk = await generateRoleQuestionsToAsk(authUser.id, roleId, body.guidance);
+    return c.json({ questions_to_ask: questionsToAsk });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to generate questions to ask";
+    return c.json({ error: message }, 400);
+  }
+});
+
 app.post("/api/roles/:id/generate-linkedin-message", async (c) => {
   const root = await ensureWorkspaceRoot();
   const authUser = c.get("authUser");
@@ -1055,6 +1071,25 @@ app.get("/api/applications/:id/interviews", async (c) => {
   if (!application) return c.json({ error: "Application not found" }, 404);
   const interviews = await getInterviewsByApplication(db, authUser.id, applicationId);
   return c.json(interviews);
+});
+
+app.post("/api/applications/:id/interviews", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const applicationId = c.req.param("id");
+  const application = await getApplicationById(db, authUser.id, applicationId);
+  if (!application) return c.json({ error: "Application not found" }, 404);
+  const body = await c.req.json();
+  if (!body?.scheduled_at) {
+    return c.json({ error: "scheduled_at is required" }, 400);
+  }
+  const interview = await createInterview(db, authUser.id, {
+    ...body,
+    application_id: applicationId,
+  });
+  return c.json(interview, 201);
 });
 
 app.put("/api/applications/:id", async (c) => {
@@ -1418,6 +1453,44 @@ app.get("/api/interviews/upcoming", async (c) => {
   return c.json(interviews);
 });
 
+app.put("/api/interviews/:id", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const interviewId = c.req.param("id");
+  const existing = await getInterviewById(db, authUser.id, interviewId);
+  if (!existing) return c.json({ error: "Interview not found" }, 404);
+  const body = await c.req.json();
+  const updated = await updateInterview(db, authUser.id, interviewId, body);
+  return c.json(updated);
+});
+
+app.patch("/api/interviews/:id", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const interviewId = c.req.param("id");
+  const existing = await getInterviewById(db, authUser.id, interviewId);
+  if (!existing) return c.json({ error: "Interview not found" }, 404);
+  const body = await c.req.json();
+  const updated = await updateInterview(db, authUser.id, interviewId, body);
+  return c.json(updated);
+});
+
+app.delete("/api/interviews/:id", async (c) => {
+  await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+  const db = getDb();
+  const interviewId = c.req.param("id");
+  const existing = await getInterviewById(db, authUser.id, interviewId);
+  if (!existing) return c.json({ error: "Interview not found" }, 404);
+  await deleteInterview(db, authUser.id, interviewId);
+  return c.json({ success: true });
+});
+
 app.get("/api/oauth/google/status", async (c) => {
   await ensureWorkspaceRoot();
   const authUser = c.get("authUser");
@@ -1653,6 +1726,13 @@ app.post("/api/interviews/:id/generate-prep", async (c) => {
 
   const db = getDb();
   const interviewId = c.req.param("id");
+  let guidance: string | undefined;
+  try {
+    const body = await c.req.json<{ guidance?: string }>();
+    guidance = body.guidance?.trim();
+  } catch {
+    guidance = undefined;
+  }
   const { apiKey, error, provider, model } = resolveLlmCredentials(root);
 
   if (!apiKey || !provider || !model) {
@@ -1678,7 +1758,12 @@ app.post("/api/interviews/:id/generate-prep", async (c) => {
 Name: ${userProfile?.full_name || "Candidate"}
 About: ${userProfile?.about_me || ""}
   `.trim();
-  
+
+  const guidanceBlock = guidance ? `
+ADDITIONAL GUIDANCE:
+${guidance}
+` : "";
+
   const prompt = `You're helping a job candidate prepare for an interview.
 
 THE ROLE:
@@ -1695,34 +1780,50 @@ INTERVIEWER: ${interview.interviewer_name || 'Unknown'} ${interview.interviewer_
 
 CANDIDATE BACKGROUND:
 ${contextToUse}
-
+${guidanceBlock}
 Generate interview preparation material with the following sections:
 
-1. KEY TALKING POINTS (3-5 bullet points of things the candidate should emphasize based on their background and this role)
+1. PREP NOTES (3-5 bullet points of things the candidate should emphasize based on their background and this role)
 
-2. LIKELY QUESTIONS (5-7 questions the interviewer might ask, tailored to this role type)
+2. QUESTIONS TO ASK (4-5 thoughtful questions the candidate should ask the interviewer)
 
-3. QUESTIONS TO ASK (4-5 thoughtful questions the candidate should ask the interviewer)
-
-4. RESEARCH NOTES (Key facts about the company and role to mention or reference)
+3. RESEARCH NOTES (Key facts about the company and role to mention or reference)
 
 Return as JSON:
 {
   "prep_notes": "bullet points as a string with newlines",
-  "likely_questions": ["question 1", "question 2", ...],
-  "questions_to_ask": "bullet points as a string with newlines", 
+  "questions_to_ask": "bullet points as a string with newlines",
   "research_notes": "key facts as a string with newlines"
 }`;
 
   try {
-    const prepData = await generateJson({
-      provider,
-      apiKey,
-      model,
-      prompt,
-      temperature: 0.6,
-      maxTokens: 1200,
-    });
+    let prepData: unknown;
+
+    try {
+      prepData = await generateJson({
+        provider,
+        apiKey,
+        model,
+        prompt,
+        temperature: 0.6,
+        maxTokens: 1200,
+      });
+    } catch (error) {
+      const fallback = await generateText({
+        provider,
+        apiKey,
+        model,
+        prompt,
+        system: "Return only valid JSON.",
+        temperature: 0.6,
+        maxTokens: 1200,
+      });
+      const jsonCandidate = fallback.match(/\{[\s\S]*\}/)?.[0];
+      if (!jsonCandidate) {
+        throw error;
+      }
+      prepData = parseJson(jsonCandidate);
+    }
 
     if (!isRecord(prepData)) {
       return c.json({ error: "Failed to parse AI response" }, 500);
@@ -1731,6 +1832,89 @@ Return as JSON:
     return c.json(prepData);
   } catch (error) {
     console.error("Failed to generate interview prep:", error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
+app.post("/api/interviews/:id/generate-follow-up", async (c) => {
+  const root = await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
+  const interviewId = c.req.param("id");
+  let guidance: string | undefined;
+  try {
+    const body = await c.req.json<{ guidance?: string }>();
+    guidance = body.guidance?.trim();
+  } catch {
+    guidance = undefined;
+  }
+
+  const { apiKey, error, provider, model } = resolveLlmCredentials(root);
+  if (!apiKey || !provider || !model) {
+    return c.json({ error: error ?? "LLM API key not configured" }, 500);
+  }
+
+  const interview = await getInterviewById(db, authUser.id, interviewId);
+  if (!interview) return c.json({ error: "Interview not found" }, 404);
+
+  const application = await getApplicationById(db, authUser.id, interview.application_id);
+  if (!application) return c.json({ error: "Application not found" }, 404);
+
+  const role = await getRoleById(db, authUser.id, application.role_id);
+  if (!role) return c.json({ error: "Role not found" }, 404);
+
+  const company = await getCompanyById(db, authUser.id, role.company_id);
+  const companyName = company?.name || "the company";
+
+  const userProfile = await getUserProfile(db, authUser.id);
+  const candidateContext = userProfile ? await getCandidateContext(db, userProfile.id) : null;
+  const candidateName = userProfile?.full_name || "";
+
+  const contextToUse = candidateContext?.full_context || `
+Name: ${userProfile?.full_name || "Candidate"}
+About: ${userProfile?.about_me || ""}
+  `.trim();
+
+  const guidanceBlock = guidance
+    ? `
+ADDITIONAL GUIDANCE:
+${guidance}
+`
+    : "";
+
+  const prompt = `Write a short, thoughtful thank-you note for a job interview.
+
+ROLE: ${role.title} at ${companyName}
+INTERVIEW TYPE: ${interview.interview_type || "General"}
+INTERVIEWER: ${interview.interviewer_name || ""} ${interview.interviewer_title ? `(${interview.interviewer_title})` : ""}
+
+CANDIDATE BACKGROUND:
+${contextToUse}
+${guidanceBlock}
+
+REQUIREMENTS:
+- 4-6 sentences
+- Specific to the role and discussion
+- Professional and warm
+- If interviewer name is known, greet them by name
+- End with the candidate's name if available
+
+Return only the note body with line breaks.`;
+
+  try {
+    const note = await generateText({
+      provider,
+      apiKey,
+      model,
+      prompt,
+      temperature: 0.4,
+      maxTokens: 500,
+    });
+    return c.json({ follow_up_note: note.trim(), candidate_name: candidateName });
+  } catch (error) {
+    console.error("Failed to generate follow-up:", error);
     return c.json({ error: String(error) }, 500);
   }
 });

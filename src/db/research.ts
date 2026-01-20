@@ -7,6 +7,7 @@ export interface RoleResearch {
   company_profile: string | null;
   fit_analysis: string | null;
   interview_questions: string | null;
+  questions_to_ask: string | null;
   talking_points: string | null;
   generated_at: string;
   updated_at: string;
@@ -45,6 +46,7 @@ export async function updateResearch(
     company_profile?: string;
     fit_analysis?: string;
     interview_questions?: string;
+    questions_to_ask?: string;
     talking_points?: string;
   }
 ): Promise<RoleResearch> {
@@ -63,6 +65,10 @@ export async function updateResearch(
   if (updates.interview_questions !== undefined) {
     sets.push(`interview_questions = $${index++}`);
     values.push(updates.interview_questions);
+  }
+  if (updates.questions_to_ask !== undefined) {
+    sets.push(`questions_to_ask = $${index++}`);
+    values.push(updates.questions_to_ask);
   }
   if (updates.talking_points !== undefined) {
     sets.push(`talking_points = $${index++}`);

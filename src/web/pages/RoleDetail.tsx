@@ -130,6 +130,7 @@ interface RoleResearch {
   company_profile: string | null;
   fit_analysis: string | null;
   interview_questions: string | null;
+  questions_to_ask: string | null;
   talking_points: string | null;
   generated_at: string;
   updated_at: string;
@@ -151,9 +152,30 @@ interface Interview {
   prep_notes: string | null;
   questions_to_ask: string | null;
   research_notes: string | null;
+  follow_up_note: string | null;
   created_at: string;
   updated_at: string;
 }
+
+const interviewPrepSections = [
+  {
+    field: "prep_notes",
+    label: "Prep Notes",
+    placeholder: "Key points to highlight about your experience and the role.",
+  },
+  {
+    field: "questions_to_ask",
+    label: "Questions to Ask",
+    placeholder: "Thoughtful questions to ask the interviewer.",
+  },
+  {
+    field: "research_notes",
+    label: "Research Notes",
+    placeholder: "Company, interviewer, or product context to reference.",
+  },
+] as const;
+
+type InterviewPrepField = (typeof interviewPrepSections)[number]["field"];
 
 interface ApplicationQuestion {
   id: string;
@@ -179,6 +201,8 @@ export function RoleDetail() {
   const [jdText, setJdText] = useState("");
   const [savingJd, setSavingJd] = useState(false);
   const [generatingResearch, setGeneratingResearch] = useState(false);
+  const [questionsToAskGuidance, setQuestionsToAskGuidance] = useState("");
+  const [regeneratingQuestionsToAsk, setRegeneratingQuestionsToAsk] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [coverLetterPreview, setCoverLetterPreview] = useState("");
   const [editingCoverLetter, setEditingCoverLetter] = useState(false);
@@ -198,6 +222,18 @@ export function RoleDetail() {
   const [calendarConnected, setCalendarConnected] = useState(false);
   const [syncingCalendar, setSyncingCalendar] = useState<string | null>(null);
   const [generatingPrepId, setGeneratingPrepId] = useState<string | null>(null);
+  const [prepGuidance, setPrepGuidance] = useState<Record<string, string>>({});
+  const [prepOpen, setPrepOpen] = useState<Record<string, boolean>>({});
+  const [prepDrafts, setPrepDrafts] = useState<Record<string, string>>({});
+  const [prepEditing, setPrepEditing] = useState<Record<string, boolean>>({});
+  const [savingPrepEdits, setSavingPrepEdits] = useState<Record<string, boolean>>({});
+  const [followUpOpen, setFollowUpOpen] = useState<Record<string, boolean>>({});
+  const [followUpGuidance, setFollowUpGuidance] = useState<Record<string, string>>({});
+  const [followUpPreview, setFollowUpPreview] = useState<Record<string, string>>({});
+  const [followUpEditText, setFollowUpEditText] = useState<Record<string, string>>({});
+  const [editingFollowUp, setEditingFollowUp] = useState<Record<string, boolean>>({});
+  const [savingFollowUp, setSavingFollowUp] = useState<Record<string, boolean>>({});
+  const [generatingFollowUpId, setGeneratingFollowUpId] = useState<string | null>(null);
   const [coverLetterContext, setCoverLetterContext] = useState("");
   const [interviews, setInterviews] = useState<Interview[]>([]);
   const [loadingInterviews, setLoadingInterviews] = useState(false);
@@ -280,6 +316,43 @@ export function RoleDetail() {
     } finally {
       setRefreshingRole(false);
       setGeneratingResearch(false);
+    }
+  };
+
+  const regenerateQuestionsToAsk = async () => {
+    if (!id) return;
+
+    setRegeneratingQuestionsToAsk(true);
+    try {
+      const response = await fetch(`/api/roles/${id}/questions-to-ask`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          guidance: questionsToAskGuidance.trim() || undefined,
+        }),
+      });
+      const result = await response.json();
+
+      if (!response.ok) {
+        addToast({
+          title: "Failed to regenerate questions",
+          description: result.error ?? "Please try again",
+          variant: "error",
+        });
+        return;
+      }
+
+      if (result.questions_to_ask) {
+        setResearch((prev) => (prev ? { ...prev, questions_to_ask: result.questions_to_ask } : prev));
+        if (!research) {
+          await loadRoleData();
+        }
+      }
+    } catch (error) {
+      console.error("Failed to regenerate questions:", error);
+      addToast({ title: "Failed to regenerate questions", variant: "error" });
+    } finally {
+      setRegeneratingQuestionsToAsk(false);
     }
   };
 
@@ -843,24 +916,77 @@ export function RoleDetail() {
     }
   };
 
-  const updateInterviewPrep = async (interviewId: string, field: string, value: string) => {
+  const updateInterviewPrep = async (
+    interviewId: string,
+    field: InterviewPrepField,
+    value: string
+  ): Promise<boolean> => {
     try {
-      await fetch(`/api/interviews/${interviewId}`, {
+      const response = await fetch(`/api/interviews/${interviewId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ [field]: value }),
       });
+      if (!response.ok) {
+        addToast({ title: "Failed to update interview prep", variant: "error" });
+        return false;
+      }
+      return true;
     } catch (error) {
       console.error("Failed to update interview prep:", error);
       addToast({ title: "Failed to update interview prep", variant: "error" });
+      return false;
     }
   };
 
+  const prepFieldKey = (interviewId: string, field: InterviewPrepField) => `${interviewId}:${field}`;
+
+  const formatPrepMarkdown = (value: string): string => {
+    const normalized = value.replace(/\r\n/g, "\n").trim();
+    if (!normalized) return "";
+    const bulletized = normalized.replace(/•\s+/g, "\n- ");
+    const lines = bulletized
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => (line.startsWith("-") || line.startsWith("*") ? line : `- ${line}`));
+    return lines.join("\n");
+  };
+
+  const startPrepEdit = (interviewId: string, field: InterviewPrepField, value: string | null) => {
+    const key = prepFieldKey(interviewId, field);
+    setPrepDrafts((prev) => ({ ...prev, [key]: value ?? "" }));
+    setPrepEditing((prev) => ({ ...prev, [key]: true }));
+  };
+
+  const updatePrepDraft = (interviewId: string, field: InterviewPrepField, value: string) => {
+    const key = prepFieldKey(interviewId, field);
+    setPrepDrafts((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const savePrepEdit = async (interviewId: string, field: InterviewPrepField) => {
+    const key = prepFieldKey(interviewId, field);
+    const value = prepDrafts[key] ?? "";
+    setSavingPrepEdits((prev) => ({ ...prev, [key]: true }));
+    const success = await updateInterviewPrep(interviewId, field, value);
+    if (success) {
+      setInterviews((prev) =>
+        prev.map((interview) => (interview.id === interviewId ? { ...interview, [field]: value } : interview))
+      );
+      setPrepEditing((prev) => ({ ...prev, [key]: false }));
+    }
+    setSavingPrepEdits((prev) => ({ ...prev, [key]: false }));
+  };
+
   const generateInterviewPrep = async (interviewId: string) => {
+    setPrepOpen((prev) => ({ ...prev, [interviewId]: true }));
     setGeneratingPrepId(interviewId);
     try {
+      const guidance = prepGuidance[interviewId]?.trim();
       const response = await fetch(`/api/interviews/${interviewId}/generate-prep`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ guidance: guidance || undefined }),
       });
       if (response.ok) {
         const data = await response.json();
@@ -876,6 +1002,79 @@ export function RoleDetail() {
       addToast({ title: "Failed to generate interview prep", variant: "error" });
     } finally {
       setGeneratingPrepId(null);
+    }
+  };
+
+  const startEditingFollowUp = (interviewId: string, value: string) => {
+    setEditingFollowUp((prev) => ({ ...prev, [interviewId]: true }));
+    setFollowUpEditText((prev) => ({ ...prev, [interviewId]: value }));
+  };
+
+  const updateFollowUpDraft = (interviewId: string, value: string) => {
+    setFollowUpEditText((prev) => ({ ...prev, [interviewId]: value }));
+  };
+
+  const saveFollowUpEdit = (interviewId: string) => {
+    const value = followUpEditText[interviewId] ?? "";
+    setFollowUpPreview((prev) => ({ ...prev, [interviewId]: value }));
+    setEditingFollowUp((prev) => ({ ...prev, [interviewId]: false }));
+  };
+
+  const acceptFollowUp = async (interviewId: string) => {
+    const note = followUpPreview[interviewId];
+    if (!note) return;
+
+    setSavingFollowUp((prev) => ({ ...prev, [interviewId]: true }));
+    try {
+      const response = await fetch(`/api/interviews/${interviewId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ follow_up_note: note }),
+      });
+      if (!response.ok) {
+        addToast({ title: "Failed to save follow-up", variant: "error" });
+        return;
+      }
+      const updated = (await response.json()) as Interview;
+      setInterviews((prev) => prev.map((interview) => (interview.id === interviewId ? updated : interview)));
+      setFollowUpPreview((prev) => {
+        const next = { ...prev };
+        delete next[interviewId];
+        return next;
+      });
+      setEditingFollowUp((prev) => ({ ...prev, [interviewId]: false }));
+    } catch (error) {
+      console.error("Failed to save follow-up:", error);
+      addToast({ title: "Failed to save follow-up", variant: "error" });
+    } finally {
+      setSavingFollowUp((prev) => ({ ...prev, [interviewId]: false }));
+    }
+  };
+
+  const generateFollowUp = async (interviewId: string) => {
+    setFollowUpOpen((prev) => ({ ...prev, [interviewId]: true }));
+    setGeneratingFollowUpId(interviewId);
+    try {
+      const guidance = followUpGuidance[interviewId]?.trim();
+      const response = await fetch(`/api/interviews/${interviewId}/generate-follow-up`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ guidance: guidance || undefined }),
+      });
+      if (!response.ok) {
+        addToast({ title: "Failed to generate follow-up", variant: "error" });
+        return;
+      }
+      const data = (await response.json()) as { follow_up_note?: string };
+      if (data.follow_up_note) {
+        setFollowUpPreview((prev) => ({ ...prev, [interviewId]: data.follow_up_note ?? "" }));
+        setEditingFollowUp((prev) => ({ ...prev, [interviewId]: false }));
+      }
+    } catch (error) {
+      console.error("Failed to generate follow-up:", error);
+      addToast({ title: "Failed to generate follow-up", variant: "error" });
+    } finally {
+      setGeneratingFollowUpId(null);
     }
   };
 
@@ -1564,11 +1763,11 @@ export function RoleDetail() {
                    </div>
                    <Card className="border-none shadow-sm ring-1 ring-border/50">
                      <CardContent className="pt-6">
-                       {research?.company_profile ? (
-                         <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed">
-                           <ReactMarkdown>{research.company_profile}</ReactMarkdown>
-                         </div>
-                       ) : (
+                        {research?.company_profile ? (
+                          <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed whitespace-pre-wrap">
+                            <ReactMarkdown>{research.company_profile}</ReactMarkdown>
+                          </div>
+                        ) : (
                          <div className="text-center py-8">
                            <p className="text-sm text-muted-foreground italic">Research not available yet.</p>
                          </div>
@@ -1584,11 +1783,11 @@ export function RoleDetail() {
                    </div>
                    <Card className="border-none shadow-sm ring-1 ring-border/50">
                      <CardContent className="pt-6">
-                       {research?.talking_points ? (
-                         <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed">
-                           <ReactMarkdown>{research.talking_points}</ReactMarkdown>
-                         </div>
-                       ) : (
+                        {research?.talking_points ? (
+                          <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed whitespace-pre-wrap">
+                            <ReactMarkdown>{research.talking_points}</ReactMarkdown>
+                          </div>
+                        ) : (
                          <div className="text-center py-8">
                            <p className="text-sm text-muted-foreground italic">Generate research to see talking points.</p>
                          </div>
@@ -1604,17 +1803,67 @@ export function RoleDetail() {
                    </div>
                    <Card className="border-none shadow-sm ring-1 ring-border/50">
                      <CardContent className="pt-6">
-                       {research?.interview_questions ? (
-                         <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed">
-                           <ReactMarkdown>{research.interview_questions}</ReactMarkdown>
-                         </div>
-                       ) : (
+                        {research?.interview_questions ? (
+                          <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed whitespace-pre-wrap">
+                            <ReactMarkdown>{research.interview_questions}</ReactMarkdown>
+                          </div>
+                        ) : (
                          <div className="text-center py-8">
                            <p className="text-sm text-muted-foreground italic">Generate research to see interview questions.</p>
                          </div>
                        )}
                      </CardContent>
                  </Card>
+                  </section>
+
+                  <section className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className="h-8 w-1 bg-emerald-500 rounded-full" />
+                        <h3 className="text-lg font-bold tracking-tight">Questions to Ask</h3>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        title="Regenerate questions"
+                        onClick={regenerateQuestionsToAsk}
+                        disabled={regeneratingQuestionsToAsk}
+                      >
+                        <RefreshCw className={regeneratingQuestionsToAsk ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                      </Button>
+                    </div>
+                    <Card className="border-none shadow-sm ring-1 ring-border/50">
+                      <CardContent className="pt-6">
+                        {research?.questions_to_ask ? (
+                          <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed whitespace-pre-wrap">
+                            <ReactMarkdown>{research.questions_to_ask}</ReactMarkdown>
+                          </div>
+                        ) : (
+                          <div className="text-center py-8">
+                            <p className="text-sm text-muted-foreground italic">
+                              Generate research to see questions to ask the interviewer.
+                            </p>
+                          </div>
+                        )}
+                        <div className="mt-6 space-y-2 border-t border-border/50 pt-4">
+                          <Label
+                            htmlFor="questions-to-ask-guidance"
+                            className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground/60 pl-1 select-none"
+                          >
+                            Refine Results
+                          </Label>
+                          <Textarea
+                            id="questions-to-ask-guidance"
+                            value={questionsToAskGuidance}
+                            onChange={(event) => setQuestionsToAskGuidance(event.target.value)}
+                            placeholder="E.g., focus on team culture, engineering velocity, or recent funding."
+                            className="min-h-[2.5rem] resize-none"
+                            rows={2}
+                          />
+                        </div>
+                      </CardContent>
+                    </Card>
                   </section>
             </div>
           </TabsContent>
@@ -2154,6 +2403,12 @@ export function RoleDetail() {
                     {interviews.map((interview) => {
                       const scheduledDate = parseUTCDate(interview.scheduled_at);
                       const isPast = scheduledDate < new Date();
+                      const followUpDraft = followUpPreview[interview.id];
+                      const hasFollowUpDraft = followUpDraft !== undefined;
+                      const followUpSaved = interview.follow_up_note;
+                      const isEditingFollowUp = editingFollowUp[interview.id] ?? false;
+                      const followUpEditValue = followUpEditText[interview.id] ?? followUpDraft ?? "";
+                      const isSavingFollowUp = savingFollowUp[interview.id] ?? false;
                       
                       return (
                         <Card key={interview.id} className="border shadow-sm">
@@ -2242,71 +2497,265 @@ export function RoleDetail() {
                               </div>
                             )}
                             
-                            <div className="mt-4 border-t pt-4">
-                              <details className="group">
-                                <summary className="flex items-center gap-2 cursor-pointer text-sm font-semibold text-slate-700 hover:text-slate-900">
-                                  <Target className="h-4 w-4 text-purple-500" />
-                                  Interview Prep
-                                  <ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90" />
-                                </summary>
-                                <div className="mt-4 space-y-4">
-                                  <Button
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={() => generateInterviewPrep(interview.id)}
-                                    disabled={generatingPrepId === interview.id}
-                                    className="w-full"
-                                  >
-                                    {generatingPrepId === interview.id ? (
-                                      <>
-                                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                        Generating prep suggestions...
-                                      </>
+                            <div className="mt-4 border-t pt-4 space-y-6">
+                              <div>
+                                <details
+                                  className="group"
+                                  open={prepOpen[interview.id] ?? false}
+                                  onToggle={(event) => {
+                                    const details = event.currentTarget;
+                                    if (!details) return;
+                                    setPrepOpen((prev) => ({
+                                      ...prev,
+                                      [interview.id]: details.open,
+                                    }));
+                                  }}
+                                >
+                                  <summary className="flex items-center gap-2 cursor-pointer text-sm font-semibold text-slate-700 hover:text-slate-900">
+                                    <Target className="h-4 w-4 text-purple-500" />
+                                    Interview Prep
+                                    <ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90" />
+                                  </summary>
+                                  <div className="mt-4 space-y-6">
+                                    <div className="rounded-lg border bg-muted/20 p-4 space-y-3">
+                                      <div>
+                                        <Label
+                                          htmlFor={`prep-guidance-${interview.id}`}
+                                          className="text-sm font-medium"
+                                        >
+                                          Prep Guidance (optional)
+                                        </Label>
+                                        <Textarea
+                                          id={`prep-guidance-${interview.id}`}
+                                          placeholder="Add specific focus areas, topics to emphasize, or tone preferences..."
+                                          value={prepGuidance[interview.id] ?? ""}
+                                          onChange={(event) =>
+                                            setPrepGuidance((prev) => ({
+                                              ...prev,
+                                              [interview.id]: event.target.value,
+                                            }))
+                                          }
+                                          className="mt-1.5 min-h-[80px] text-sm"
+                                        />
+                                      </div>
+                                      <Button
+                                        onClick={() => generateInterviewPrep(interview.id)}
+                                        disabled={generatingPrepId === interview.id}
+                                        className="w-full shadow-sm"
+                                        variant={
+                                          interview.prep_notes || interview.questions_to_ask || interview.research_notes
+                                            ? "outline"
+                                            : "default"
+                                        }
+                                      >
+                                        {generatingPrepId === interview.id ? (
+                                          <>
+                                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                            Generating prep suggestions...
+                                          </>
+                                        ) : (
+                                          <>
+                                            <Sparkles className="mr-2 h-4 w-4" />
+                                            {interview.prep_notes || interview.questions_to_ask || interview.research_notes
+                                              ? "Regenerate Prep Suggestions"
+                                              : "Generate AI Prep Suggestions"}
+                                          </>
+                                        )}
+                                      </Button>
+                                    </div>
+                                    <div className="space-y-5">
+                                      {interviewPrepSections.map((section) => {
+                                        const fieldKey = prepFieldKey(interview.id, section.field);
+                                        const value = interview[section.field];
+                                        const formattedValue = value ? formatPrepMarkdown(value) : "";
+                                        const isEditing = prepEditing[fieldKey];
+                                        const draftValue = prepDrafts[fieldKey] ?? value ?? "";
+                                        const isSaving = savingPrepEdits[fieldKey];
+
+                                        return (
+                                          <div key={`${interview.id}-${section.field}`} className="space-y-2">
+                                            <div className="flex items-center justify-between">
+                                              <Label className="text-xs font-medium text-slate-600">{section.label}</Label>
+                                              {isEditing ? (
+                                                <Button
+                                                  onClick={() => savePrepEdit(interview.id, section.field)}
+                                                  size="icon"
+                                                  variant="ghost"
+                                                  className="h-8 w-8"
+                                                  disabled={isSaving}
+                                                >
+                                                  {isSaving ? (
+                                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                                  ) : (
+                                                    <Save className="h-4 w-4" />
+                                                  )}
+                                                </Button>
+                                              ) : (
+                                                <Button
+                                                  onClick={() => startPrepEdit(interview.id, section.field, value)}
+                                                  size="icon"
+                                                  variant="ghost"
+                                                  className="h-8 w-8"
+                                                >
+                                                  <Pencil className="h-4 w-4" />
+                                                </Button>
+                                              )}
+                                            </div>
+                                            {isEditing ? (
+                                              <Textarea
+                                                value={draftValue}
+                                                onChange={(event) =>
+                                                  updatePrepDraft(interview.id, section.field, event.target.value)
+                                                }
+                                                className="min-h-[140px] resize-none font-mono text-sm"
+                                              />
+                                            ) : value ? (
+                                              <div className="p-4 border rounded-lg bg-muted/20">
+                                                <div className="prose prose-sm max-w-none dark:prose-invert whitespace-pre-wrap">
+                                                  <ReactMarkdown>{formattedValue}</ReactMarkdown>
+                                                </div>
+                                              </div>
+                                            ) : (
+                                              <div className="text-sm text-muted-foreground bg-muted/10 border border-dashed rounded-lg p-4">
+                                                {section.placeholder}
+                                              </div>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                </details>
+                              </div>
+                              <div>
+                                <details
+                                  className="group"
+                                  open={followUpOpen[interview.id] ?? false}
+                                  onToggle={(event) => {
+                                    const details = event.currentTarget;
+                                    if (!details) return;
+                                    setFollowUpOpen((prev) => ({
+                                      ...prev,
+                                      [interview.id]: details.open,
+                                    }));
+                                  }}
+                                >
+                                  <summary className="flex items-center gap-2 cursor-pointer text-sm font-semibold text-slate-700 hover:text-slate-900">
+                                    <MessageSquare className="h-4 w-4 text-blue-500" />
+                                    Follow-Up
+                                    <ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90" />
+                                  </summary>
+                                  <div className="mt-4 space-y-4">
+                                    {hasFollowUpDraft ? (
+                                      <div className="p-4 border rounded-lg bg-muted/20">
+                                        <div className="flex items-center justify-between mb-2">
+                                          <Label className="text-xs font-medium text-slate-600">Draft</Label>
+                                          {isEditingFollowUp ? (
+                                            <Button
+                                              onClick={() => saveFollowUpEdit(interview.id)}
+                                              size="icon"
+                                              variant="ghost"
+                                              className="h-8 w-8"
+                                            >
+                                              <Save className="h-4 w-4" />
+                                            </Button>
+                                          ) : (
+                                            <div className="flex gap-1">
+                                              <Button
+                                                onClick={() => startEditingFollowUp(interview.id, followUpDraft ?? "")}
+                                                size="icon"
+                                                variant="ghost"
+                                                className="h-8 w-8"
+                                              >
+                                                <Pencil className="h-4 w-4" />
+                                              </Button>
+                                              <Button
+                                                onClick={() => acceptFollowUp(interview.id)}
+                                                size="icon"
+                                                variant="ghost"
+                                                className="h-8 w-8 text-emerald-600"
+                                                disabled={isSavingFollowUp}
+                                              >
+                                                {isSavingFollowUp ? (
+                                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                                ) : (
+                                                  <Check className="h-4 w-4" />
+                                                )}
+                                              </Button>
+                                            </div>
+                                          )}
+                                        </div>
+                                        {isEditingFollowUp ? (
+                                          <Textarea
+                                            value={followUpEditValue}
+                                            onChange={(event) => updateFollowUpDraft(interview.id, event.target.value)}
+                                            className="min-h-[160px] resize-none font-mono text-sm"
+                                          />
+                                        ) : (
+                                          <div className="text-sm whitespace-pre-wrap leading-6 text-slate-700 dark:text-slate-200">
+                                            {followUpDraft ?? ""}
+                                          </div>
+                                        )}
+                                      </div>
+                                    ) : followUpSaved ? (
+                                      <div className="p-4 border rounded-lg bg-muted/20">
+                                        <div className="flex items-center gap-2 text-xs font-semibold text-emerald-600 mb-2">
+                                          <CheckCircle2 className="h-4 w-4" />
+                                          Accepted
+                                        </div>
+                                        <div className="text-sm whitespace-pre-wrap leading-6 text-slate-700 dark:text-slate-200">
+                                          {followUpSaved}
+                                        </div>
+                                      </div>
                                     ) : (
-                                      <>
-                                        <Sparkles className="h-4 w-4 mr-2" />
-                                        Generate AI Prep Suggestions
-                                      </>
+                                      <div className="text-sm text-muted-foreground bg-muted/10 border border-dashed rounded-lg p-4">
+                                        Generate a thank-you note to send after this interview.
+                                      </div>
                                     )}
-                                  </Button>
-                                  <div>
-                                    <Label htmlFor={`prep-notes-${interview.id}`} className="text-xs font-medium text-slate-600">
-                                      Prep Notes
-                                    </Label>
-                                    <Textarea
-                                      id={`prep-notes-${interview.id}`}
-                                      placeholder="Key points to remember, things to highlight about your experience..."
-                                      className="mt-1 min-h-[80px] text-sm"
-                                      defaultValue={interview.prep_notes || ""}
-                                      onBlur={(e) => updateInterviewPrep(interview.id, "prep_notes", e.target.value)}
-                                    />
+                                    {!followUpSaved && (
+                                      <div className="rounded-lg border bg-muted/20 p-4 space-y-3">
+                                        <div>
+                                          <Label
+                                            htmlFor={`follow-up-guidance-${interview.id}`}
+                                            className="text-sm font-medium"
+                                          >
+                                            Follow-Up Guidance (optional)
+                                          </Label>
+                                          <Textarea
+                                            id={`follow-up-guidance-${interview.id}`}
+                                            placeholder="Mention specific topics, moments, or next steps to include..."
+                                            value={followUpGuidance[interview.id] ?? ""}
+                                            onChange={(event) =>
+                                              setFollowUpGuidance((prev) => ({
+                                                ...prev,
+                                                [interview.id]: event.target.value,
+                                              }))
+                                            }
+                                            className="mt-1.5 min-h-[80px] text-sm"
+                                          />
+                                        </div>
+                                        <Button
+                                          onClick={() => generateFollowUp(interview.id)}
+                                          disabled={generatingFollowUpId === interview.id}
+                                          className="w-full shadow-sm"
+                                        >
+                                          {generatingFollowUpId === interview.id ? (
+                                            <>
+                                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                              Drafting follow-up...
+                                            </>
+                                          ) : (
+                                            <>
+                                              <Sparkles className="mr-2 h-4 w-4" />
+                                              Generate Thank You Note
+                                            </>
+                                          )}
+                                        </Button>
+                                      </div>
+                                    )}
                                   </div>
-                                  <div>
-                                    <Label htmlFor={`questions-${interview.id}`} className="text-xs font-medium text-slate-600">
-                                      Questions to Ask
-                                    </Label>
-                                    <Textarea
-                                      id={`questions-${interview.id}`}
-                                      placeholder="What questions do you want to ask the interviewer?"
-                                      className="mt-1 min-h-[80px] text-sm"
-                                      defaultValue={interview.questions_to_ask || ""}
-                                      onBlur={(e) => updateInterviewPrep(interview.id, "questions_to_ask", e.target.value)}
-                                    />
-                                  </div>
-                                  <div>
-                                    <Label htmlFor={`research-${interview.id}`} className="text-xs font-medium text-slate-600">
-                                      Research Notes
-                                    </Label>
-                                    <Textarea
-                                      id={`research-${interview.id}`}
-                                      placeholder="Company news, interviewer background, recent product launches..."
-                                      className="mt-1 min-h-[80px] text-sm"
-                                      defaultValue={interview.research_notes || ""}
-                                      onBlur={(e) => updateInterviewPrep(interview.id, "research_notes", e.target.value)}
-                                    />
-                                  </div>
-                                </div>
-                              </details>
+                                </details>
+                              </div>
                             </div>
                           </CardContent>
                         </Card>

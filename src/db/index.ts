@@ -170,6 +170,7 @@ export type BackupRoleResearch = {
   company_profile: string | null;
   fit_analysis: string | null;
   interview_questions: string | null;
+  questions_to_ask: string | null;
   talking_points: string | null;
   generated_at: string | null;
   updated_at: string | null;
@@ -286,6 +287,7 @@ export async function runMigrations(database: DbClient): Promise<void> {
     { name: "duration_minutes", definition: "INTEGER" },
     { name: "location", definition: "TEXT" },
     { name: "video_link", definition: "TEXT" },
+    { name: "follow_up_note", definition: "TEXT" },
   ]);
 
   await addColumnsIfMissing(database, "applications", [
@@ -310,6 +312,7 @@ export async function runMigrations(database: DbClient): Promise<void> {
 
   await addColumnsIfMissing(database, "role_research", [
     { name: "user_id", definition: "TEXT" },
+    { name: "questions_to_ask", definition: "TEXT" },
   ]);
 
   await addColumnsIfMissing(database, "application_questions", [
@@ -423,6 +426,7 @@ const INTERVIEW_COLUMNS = [
   "prep_notes",
   "questions_to_ask",
   "research_notes",
+  "follow_up_note",
   "format",
   "interviewers_json",
   "notes",
@@ -509,6 +513,7 @@ const ROLE_RESEARCH_COLUMNS = [
   "company_profile",
   "fit_analysis",
   "interview_questions",
+  "questions_to_ask",
   "talking_points",
   "generated_at",
   "updated_at",
@@ -783,6 +788,7 @@ CREATE TABLE IF NOT EXISTS interviews (
     prep_notes TEXT,
     questions_to_ask TEXT,
     research_notes TEXT,
+    follow_up_note TEXT,
     format TEXT,
     interviewers_json TEXT,
     notes TEXT,
@@ -797,6 +803,7 @@ ALTER TABLE interviews ADD COLUMN IF NOT EXISTS google_calendar_event_id TEXT;
 ALTER TABLE interviews ADD COLUMN IF NOT EXISTS prep_notes TEXT;
 ALTER TABLE interviews ADD COLUMN IF NOT EXISTS questions_to_ask TEXT;
 ALTER TABLE interviews ADD COLUMN IF NOT EXISTS research_notes TEXT;
+ALTER TABLE interviews ADD COLUMN IF NOT EXISTS follow_up_note TEXT;
 
 CREATE TABLE IF NOT EXISTS artifacts (
     id TEXT PRIMARY KEY,
@@ -877,6 +884,7 @@ CREATE TABLE IF NOT EXISTS role_research (
     company_profile TEXT,
     fit_analysis TEXT,
     interview_questions TEXT,
+    questions_to_ask TEXT,
     talking_points TEXT,
     generated_at TEXT,
     updated_at TEXT

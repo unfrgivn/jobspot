@@ -14,12 +14,20 @@ export interface ResearchInput {
   candidateContext: string;
 }
 
+export type CompanyResearchOptions = {
+  includeInterviewQuestions?: boolean;
+  includeQuestionsToAsk?: boolean;
+};
+
 export async function* generateCompanyResearch(
-  input: ResearchInput
+  input: ResearchInput,
+  options: CompanyResearchOptions = {}
 ): AsyncGenerator<{ section: string; content: string }> {
+  const includeInterviewQuestions = options.includeInterviewQuestions ?? true;
+  const includeQuestionsToAsk = options.includeQuestionsToAsk ?? true;
   const companyProfile = buildCompanyProfilePrompt(input);
-  const interviewQuestions = buildInterviewQuestionsPrompt(input);
   const talkingPoints = buildTalkingPointsPrompt(input);
+  const interviewQuestions = includeInterviewQuestions ? buildInterviewQuestionsPrompt(input) : null;
 
   let companyProfileContent = "";
   for await (const chunk of streamText({
@@ -43,16 +51,23 @@ export async function* generateCompanyResearch(
   const fitContent = JSON.stringify(fitResult, null, 2);
   yield { section: "fit_analysis", content: fitContent };
 
-  let interviewQuestionsContent = "";
-  for await (const chunk of streamText({
-    provider: input.provider,
-    apiKey: input.apiKey,
-    model: input.model,
-    prompt: interviewQuestions,
-  })) {
-    interviewQuestionsContent += chunk;
+  if (includeInterviewQuestions && interviewQuestions) {
+    let interviewQuestionsContent = "";
+    for await (const chunk of streamText({
+      provider: input.provider,
+      apiKey: input.apiKey,
+      model: input.model,
+      prompt: interviewQuestions,
+    })) {
+      interviewQuestionsContent += chunk;
+    }
+    yield { section: "interview_questions", content: interviewQuestionsContent };
   }
-  yield { section: "interview_questions", content: interviewQuestionsContent };
+
+  if (includeQuestionsToAsk) {
+    const questionsToAskContent = await generateQuestionsToAsk(input);
+    yield { section: "questions_to_ask", content: questionsToAskContent };
+  }
 
   let talkingPointsContent = "";
   for await (const chunk of streamText({
@@ -64,6 +79,20 @@ export async function* generateCompanyResearch(
     talkingPointsContent += chunk;
   }
   yield { section: "talking_points", content: talkingPointsContent };
+}
+
+export async function generateQuestionsToAsk(input: ResearchInput, guidance?: string): Promise<string> {
+  const prompt = buildQuestionsToAskPrompt(input, guidance);
+  let questionsToAskContent = "";
+  for await (const chunk of streamText({
+    provider: input.provider,
+    apiKey: input.apiKey,
+    model: input.model,
+    prompt,
+  })) {
+    questionsToAskContent += chunk;
+  }
+  return questionsToAskContent;
 }
 
 function buildCompanyProfilePrompt(input: ResearchInput): string {
@@ -138,6 +167,35 @@ For each question, provide:
 - Key elements to include in a strong answer
 
 OUTPUT: Markdown format. Be specific to THIS role and THIS candidate's background.`;
+}
+
+function buildQuestionsToAskPrompt(input: ResearchInput, guidance?: string): string {
+  const trimmedGuidance = guidance?.trim();
+  return `You are a senior executive coach helping a candidate prepare questions to ask during interviews.
+
+${input.candidateContext}
+
+TARGET COMPANY: ${input.companyName}
+TARGET ROLE: ${input.roleTitle}
+
+JOB DESCRIPTION:
+${input.jobDescription}
+${trimmedGuidance ? `
+ADDITIONAL GUIDANCE:
+${trimmedGuidance}
+` : ""}
+
+TASK: Generate 5 tight, concise questions the candidate should ask the interviewer. The goal is to signal deep, role-specific thoughtfulness (not generic job-seeking). Cover:
+
+1. **Role Scope** - Expectations for the first 90 days
+2. **Success Metrics** - How success will be measured
+3. **Team & Partners** - Key stakeholders and collaboration patterns
+4. **Engineering Challenges** - Top technical or organizational risks
+5. **Culture & Leadership** - Values and decision-making signals
+
+For each question, provide only the question. Keep each to one sentence with no extra commentary.
+
+OUTPUT: Markdown list of exactly 5 questions. Be specific to THIS role and THIS company.`;
 }
 
 function buildTalkingPointsPrompt(input: ResearchInput): string {

@@ -18,6 +18,7 @@ export interface Interview {
   prep_notes: string | null;
   questions_to_ask: string | null;
   research_notes: string | null;
+  follow_up_note: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -25,6 +26,7 @@ export interface Interview {
 export interface CreateInterviewInput {
   application_id: string;
   scheduled_at: string;
+  round_name?: string;
   interview_type?: string;
   interviewer_name?: string;
   interviewer_title?: string;
@@ -37,6 +39,7 @@ export interface CreateInterviewInput {
   prep_notes?: string;
   questions_to_ask?: string;
   research_notes?: string;
+  follow_up_note?: string;
 }
 
 export async function getInterviewsByApplication(
@@ -73,19 +76,21 @@ export async function createInterview(
   input: CreateInterviewInput
 ): Promise<Interview> {
   const id = uuidv4();
+  const roundName = input.round_name?.trim() || input.interview_type?.trim() || "Interview";
 
   const rows = (await db.unsafe(
     `INSERT INTO interviews (
-      id, user_id, application_id, scheduled_at, interview_type,
+      id, user_id, application_id, round_name, scheduled_at, interview_type,
       interviewer_name, interviewer_title, notes, outcome,
       duration_minutes, location, video_link, google_calendar_event_id,
-      prep_notes, questions_to_ask, research_notes
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+      prep_notes, questions_to_ask, research_notes, follow_up_note
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
     RETURNING *`,
     [
       id,
       userId,
       input.application_id,
+      roundName,
       input.scheduled_at,
       input.interview_type || null,
       input.interviewer_name || null,
@@ -99,6 +104,7 @@ export async function createInterview(
       input.prep_notes || null,
       input.questions_to_ask || null,
       input.research_notes || null,
+      input.follow_up_note || null,
     ]
   )) as Interview[];
 
@@ -116,6 +122,7 @@ export async function updateInterview(
   let index = 1;
 
   const fields = [
+    "round_name",
     "scheduled_at",
     "interview_type",
     "interviewer_name",
@@ -129,6 +136,7 @@ export async function updateInterview(
     "prep_notes",
     "questions_to_ask",
     "research_notes",
+    "follow_up_note",
   ] as const;
 
   for (const field of fields) {
