@@ -1840,7 +1840,7 @@ export function RoleDetail() {
                    <Card className="border-none shadow-sm ring-1 ring-border/50">
                      <CardContent className="pt-6">
                         {research?.company_profile ? (
-                          <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed whitespace-pre-wrap">
+                          <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed whitespace-pre-wrap prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5">
                             <ReactMarkdown>{research.company_profile}</ReactMarkdown>
                           </div>
                         ) : (
@@ -1860,7 +1860,7 @@ export function RoleDetail() {
                    <Card className="border-none shadow-sm ring-1 ring-border/50">
                      <CardContent className="pt-6">
                         {research?.talking_points ? (
-                          <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed whitespace-pre-wrap">
+                          <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed whitespace-pre-wrap prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5">
                             <ReactMarkdown>{research.talking_points}</ReactMarkdown>
                           </div>
                         ) : (
@@ -1880,7 +1880,7 @@ export function RoleDetail() {
                    <Card className="border-none shadow-sm ring-1 ring-border/50">
                      <CardContent className="pt-6">
                         {research?.interview_questions ? (
-                          <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed whitespace-pre-wrap">
+                          <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed whitespace-pre-wrap prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5">
                             <ReactMarkdown>{research.interview_questions}</ReactMarkdown>
                           </div>
                         ) : (
@@ -1912,7 +1912,7 @@ export function RoleDetail() {
                     <Card className="border-none shadow-sm ring-1 ring-border/50">
                       <CardContent className="pt-6">
                         {research?.questions_to_ask ? (
-                          <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed whitespace-pre-wrap">
+                          <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed whitespace-pre-wrap prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5">
                             <ReactMarkdown>{research.questions_to_ask}</ReactMarkdown>
                           </div>
                         ) : (
@@ -2500,6 +2500,8 @@ export function RoleDetail() {
                       const followUpEditValue = followUpEditText[interview.id] ?? followUpDraft ?? "";
                       const isSavingFollowUp = savingFollowUp[interview.id] ?? false;
                       const transcriptValue = transcripts[interview.id] ?? interview.transcript ?? "";
+                      const savedTranscript = interview.transcript?.trim() ?? "";
+                      const canAnalyze = savedTranscript.length > 0;
                       const analysisValue = analyses[interview.id] ?? interview.analysis_notes ?? "";
                       const isAnalyzing = analyzing[interview.id] ?? false;
                       const isSavingTranscript = savingTranscript[interview.id] ?? false;
@@ -2875,10 +2877,10 @@ export function RoleDetail() {
                                         <div className="flex gap-2">
                                           <Button
                                             size="sm"
-                                            variant="secondary"
+                                            variant={canAnalyze ? "default" : "secondary"}
                                             className="w-full"
-                                            onClick={() => analyzeTranscript(interview.id, transcriptValue)}
-                                            disabled={!transcriptValue.trim() || isAnalyzing}
+                                            onClick={() => analyzeTranscript(interview.id, savedTranscript)}
+                                            disabled={!canAnalyze || isAnalyzing}
                                           >
                                             {isAnalyzing ? (
                                               <>
@@ -2901,17 +2903,17 @@ export function RoleDetail() {
                                           <Label className="text-xs font-medium text-slate-600">Transcript</Label>
                                           <Button
                                             variant="ghost"
-                                            size="sm"
-                                            className="h-6 text-xs"
+                                            size="icon"
+                                            className="h-7 w-7"
+                                            aria-label="Save transcript"
                                             onClick={() => saveTranscript(interview.id, transcriptValue)}
                                             disabled={isSavingTranscript}
                                           >
                                             {isSavingTranscript ? (
-                                              <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                                              <Loader2 className="h-3 w-3 animate-spin" />
                                             ) : (
-                                              <Save className="mr-1 h-3 w-3" />
+                                              <Save className="h-3 w-3" />
                                             )}
-                                            Save
                                           </Button>
                                         </div>
                                         <Textarea
@@ -2937,8 +2939,8 @@ export function RoleDetail() {
                                               variant="ghost"
                                               size="sm"
                                               className="h-6 text-xs"
-                                              onClick={() => analyzeTranscript(interview.id, transcriptValue)}
-                                              disabled={isAnalyzing}
+                                              onClick={() => analyzeTranscript(interview.id, savedTranscript)}
+                                              disabled={!canAnalyze || isAnalyzing}
                                             >
                                               {isAnalyzing ? (
                                                 <Loader2 className="h-3 w-3 animate-spin" />
