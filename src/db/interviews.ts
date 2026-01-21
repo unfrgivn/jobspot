@@ -11,6 +11,7 @@ export interface Interview {
   interviewer_title: string | null;
   notes: string | null;
   outcome: string | null;
+  rating: number | null;
   duration_minutes: number | null;
   location: string | null;
   video_link: string | null;
@@ -19,6 +20,8 @@ export interface Interview {
   questions_to_ask: string | null;
   research_notes: string | null;
   follow_up_note: string | null;
+  transcript: string | null;
+  analysis_notes: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -32,6 +35,7 @@ export interface CreateInterviewInput {
   interviewer_title?: string;
   notes?: string;
   outcome?: string;
+  rating?: number;
   duration_minutes?: number;
   location?: string;
   video_link?: string;
@@ -40,6 +44,8 @@ export interface CreateInterviewInput {
   questions_to_ask?: string;
   research_notes?: string;
   follow_up_note?: string;
+  transcript?: string;
+  analysis_notes?: string;
 }
 
 export async function getInterviewsByApplication(
@@ -81,10 +87,11 @@ export async function createInterview(
   const rows = (await db.unsafe(
     `INSERT INTO interviews (
       id, user_id, application_id, round_name, scheduled_at, interview_type,
-      interviewer_name, interviewer_title, notes, outcome,
+      interviewer_name, interviewer_title, notes, outcome, rating,
       duration_minutes, location, video_link, google_calendar_event_id,
-      prep_notes, questions_to_ask, research_notes, follow_up_note
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+      prep_notes, questions_to_ask, research_notes, follow_up_note,
+      transcript, analysis_notes
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
     RETURNING *`,
     [
       id,
@@ -97,6 +104,7 @@ export async function createInterview(
       input.interviewer_title || null,
       input.notes || null,
       input.outcome || null,
+      input.rating ?? null,
       input.duration_minutes || 60,
       input.location || null,
       input.video_link || null,
@@ -105,6 +113,8 @@ export async function createInterview(
       input.questions_to_ask || null,
       input.research_notes || null,
       input.follow_up_note || null,
+      input.transcript || null,
+      input.analysis_notes || null,
     ]
   )) as Interview[];
 
@@ -129,6 +139,7 @@ export async function updateInterview(
     "interviewer_title",
     "notes",
     "outcome",
+    "rating",
     "duration_minutes",
     "location",
     "video_link",
@@ -137,6 +148,8 @@ export async function updateInterview(
     "questions_to_ask",
     "research_notes",
     "follow_up_note",
+    "transcript",
+    "analysis_notes",
   ] as const;
 
   for (const field of fields) {

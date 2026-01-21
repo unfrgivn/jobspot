@@ -1919,6 +1919,79 @@ Return only the note body with line breaks.`;
   }
 });
 
+app.post("/api/interviews/:id/analyze-transcript", async (c) => {
+  const root = await ensureWorkspaceRoot();
+  const authUser = c.get("authUser");
+  if (!authUser) return c.json({ error: "Unauthorized" }, 401);
+
+  const db = getDb();
+  const interviewId = c.req.param("id");
+  const interview = await getInterviewById(db, authUser.id, interviewId);
+  if (!interview) return c.json({ error: "Interview not found" }, 404);
+
+  let transcript: string | undefined;
+  try {
+    const body = await c.req.json<{ transcript?: string }>();
+    transcript = body.transcript?.trim();
+  } catch {
+    transcript = undefined;
+  }
+
+  const transcriptToUse = transcript ?? interview.transcript?.trim();
+  if (!transcriptToUse) {
+    return c.json({ error: "Transcript is required" }, 400);
+  }
+
+  const { apiKey, error, provider, model } = resolveLlmCredentials(root);
+  if (!apiKey || !provider || !model) {
+    return c.json({ error: error ?? "LLM API key not configured" }, 500);
+  }
+
+  const application = await getApplicationById(db, authUser.id, interview.application_id);
+  if (!application) return c.json({ error: "Application not found" }, 404);
+
+  const role = await getRoleById(db, authUser.id, application.role_id);
+  if (!role) return c.json({ error: "Role not found" }, 404);
+
+  const company = await getCompanyById(db, authUser.id, role.company_id);
+  const companyName = company?.name || "the company";
+
+  const prompt = `You are a brutally honest interview coach. Review this transcript and provide feedback in Markdown with clear headings.
+
+ROLE: ${role.title} at ${companyName}
+INTERVIEW TYPE: ${interview.interview_type || "General"}
+
+TRANSCRIPT:
+${transcriptToUse}
+
+Write sections with headings:
+- What Went Well (bullet points)
+- Concerns (bullet points)
+- Where to Improve (bullet points)
+- Overall Impression (2-4 sentences)
+
+Be direct, specific, and actionable.`;
+
+  try {
+    const analysis = await generateText({
+      provider,
+      apiKey,
+      model,
+      prompt,
+      temperature: 0.4,
+      maxTokens: 900,
+    });
+    const updated = await updateInterview(db, authUser.id, interviewId, {
+      transcript: transcriptToUse,
+      analysis_notes: analysis.trim(),
+    });
+    return c.json({ analysis_notes: updated.analysis_notes });
+  } catch (error) {
+    console.error("Failed to analyze transcript:", error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
 app.post("/api/interviews/:id/sync-calendar", async (c) => {
   const { id } = c.req.param();
   await ensureWorkspaceRoot();

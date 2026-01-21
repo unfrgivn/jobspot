@@ -145,6 +145,7 @@ interface Interview {
   interviewer_title: string | null;
   notes: string | null;
   outcome: string | null;
+  rating: number | null;
   duration_minutes: number | null;
   location: string | null;
   video_link: string | null;
@@ -153,6 +154,8 @@ interface Interview {
   questions_to_ask: string | null;
   research_notes: string | null;
   follow_up_note: string | null;
+  transcript: string | null;
+  analysis_notes: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -235,6 +238,11 @@ export function RoleDetail() {
   const [savingFollowUp, setSavingFollowUp] = useState<Record<string, boolean>>({});
   const [generatingFollowUpId, setGeneratingFollowUpId] = useState<string | null>(null);
   const [coverLetterContext, setCoverLetterContext] = useState("");
+  const [callReviewOpen, setCallReviewOpen] = useState<Record<string, boolean>>({});
+  const [transcripts, setTranscripts] = useState<Record<string, string>>({});
+  const [analyses, setAnalyses] = useState<Record<string, string>>({});
+  const [analyzing, setAnalyzing] = useState<Record<string, boolean>>({});
+  const [savingTranscript, setSavingTranscript] = useState<Record<string, boolean>>({});
   const [interviews, setInterviews] = useState<Interview[]>([]);
   const [loadingInterviews, setLoadingInterviews] = useState(false);
   const [showInterviewDialog, setShowInterviewDialog] = useState(false);
@@ -248,7 +256,8 @@ export function RoleDetail() {
     outcome: "pending",
     duration_minutes: "60",
     location: "",
-    video_link: ""
+    video_link: "",
+    rating: ""
   });
   
   const [currentQuestion, setCurrentQuestion] = useState("");
@@ -822,8 +831,10 @@ export function RoleDetail() {
         outcome: interview.outcome || "pending",
         duration_minutes: String(interview.duration_minutes || 60),
         location: interview.location || "",
-        video_link: interview.video_link || ""
+        video_link: interview.video_link || "",
+        rating: interview.rating ? String(interview.rating) : ""
       });
+
     } else {
       setEditingInterview(null);
       const currentDate = new Date();
@@ -837,7 +848,8 @@ export function RoleDetail() {
         outcome: "pending",
         duration_minutes: "60",
         location: "",
-        video_link: ""
+        video_link: "",
+        rating: ""
       });
     }
     setShowInterviewDialog(true);
@@ -847,6 +859,10 @@ export function RoleDetail() {
     if (!role?.application_id) return;
     
     const utcTimestamp = new Date(interviewForm.scheduled_at).toISOString().replace('T', ' ').slice(0, 19);
+    const parsedRating = Number(interviewForm.rating);
+    const ratingValue = Number.isFinite(parsedRating) && parsedRating >= 1 && parsedRating <= 10
+      ? parsedRating
+      : null;
     
     try {
       if (editingInterview) {
@@ -860,6 +876,7 @@ export function RoleDetail() {
             interviewer_title: interviewForm.interviewer_title || null,
             notes: interviewForm.notes || null,
             outcome: interviewForm.outcome || null,
+            rating: ratingValue,
             duration_minutes: parseInt(interviewForm.duration_minutes) || 60,
             location: interviewForm.location || null,
             video_link: interviewForm.video_link || null,
@@ -882,6 +899,7 @@ export function RoleDetail() {
             interviewer_title: interviewForm.interviewer_title || null,
             notes: interviewForm.notes || null,
             outcome: interviewForm.outcome || null,
+            rating: ratingValue,
             duration_minutes: parseInt(interviewForm.duration_minutes) || 60,
             location: interviewForm.location || null,
             video_link: interviewForm.video_link || null,
@@ -1075,6 +1093,64 @@ export function RoleDetail() {
       addToast({ title: "Failed to generate follow-up", variant: "error" });
     } finally {
       setGeneratingFollowUpId(null);
+    }
+  };
+
+  const saveTranscript = async (interviewId: string, transcriptValue: string) => {
+    setSavingTranscript((prev) => ({ ...prev, [interviewId]: true }));
+    try {
+      const response = await fetch(`/api/interviews/${interviewId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transcript: transcriptValue.trim() || null }),
+      });
+      if (!response.ok) {
+        addToast({ title: "Failed to save transcript", variant: "error" });
+        return;
+      }
+      const updated = (await response.json()) as Interview;
+      setInterviews((prev) => prev.map((interview) => (interview.id === interviewId ? updated : interview)));
+    } catch (error) {
+      console.error("Failed to save transcript:", error);
+      addToast({ title: "Failed to save transcript", variant: "error" });
+    } finally {
+      setSavingTranscript((prev) => ({ ...prev, [interviewId]: false }));
+    }
+  };
+
+  const analyzeTranscript = async (interviewId: string, transcriptValue: string) => {
+    if (!transcriptValue.trim()) {
+      addToast({ title: "Add a transcript to analyze", variant: "error" });
+      return;
+    }
+
+    setCallReviewOpen((prev) => ({ ...prev, [interviewId]: true }));
+    setAnalyzing((prev) => ({ ...prev, [interviewId]: true }));
+    try {
+      const response = await fetch(`/api/interviews/${interviewId}/analyze-transcript`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transcript: transcriptValue }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        addToast({
+          title: "Failed to analyze transcript",
+          description: data.error ?? "Please try again",
+          variant: "error",
+        });
+        return;
+      }
+      const analysis = data.analysis_notes ?? "";
+      setAnalyses((prev) => ({ ...prev, [interviewId]: analysis }));
+      setInterviews((prev) =>
+        prev.map((interview) => (interview.id === interviewId ? { ...interview, analysis_notes: analysis } : interview))
+      );
+    } catch (error) {
+      console.error("Failed to analyze transcript:", error);
+      addToast({ title: "Failed to analyze transcript", variant: "error" });
+    } finally {
+      setAnalyzing((prev) => ({ ...prev, [interviewId]: false }));
     }
   };
 
@@ -2347,19 +2423,33 @@ export function RoleDetail() {
                             />
                           </div>
                         </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="outcome">Outcome</Label>
-                          <select
-                            id="outcome"
-                            value={interviewForm.outcome}
-                            onChange={(e) => setInterviewForm({ ...interviewForm, outcome: e.target.value })}
-                            className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            <option value="pending">Pending</option>
-                            <option value="passed">Passed</option>
-                            <option value="rejected">Rejected</option>
-                            <option value="cancelled">Cancelled</option>
-                          </select>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <Label htmlFor="outcome">Outcome</Label>
+                            <select
+                              id="outcome"
+                              value={interviewForm.outcome}
+                              onChange={(e) => setInterviewForm({ ...interviewForm, outcome: e.target.value })}
+                              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              <option value="pending">Pending</option>
+                              <option value="passed">Passed</option>
+                              <option value="rejected">Rejected</option>
+                              <option value="cancelled">Cancelled</option>
+                            </select>
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="rating">Rating</Label>
+                            <Input
+                              id="rating"
+                              type="number"
+                              min="1"
+                              max="10"
+                              value={interviewForm.rating}
+                              onChange={(e) => setInterviewForm({ ...interviewForm, rating: e.target.value })}
+                              placeholder="1-10"
+                            />
+                          </div>
                         </div>
                         <div className="space-y-2">
                           <Label htmlFor="notes">Notes</Label>
@@ -2409,6 +2499,10 @@ export function RoleDetail() {
                       const isEditingFollowUp = editingFollowUp[interview.id] ?? false;
                       const followUpEditValue = followUpEditText[interview.id] ?? followUpDraft ?? "";
                       const isSavingFollowUp = savingFollowUp[interview.id] ?? false;
+                      const transcriptValue = transcripts[interview.id] ?? interview.transcript ?? "";
+                      const analysisValue = analyses[interview.id] ?? interview.analysis_notes ?? "";
+                      const isAnalyzing = analyzing[interview.id] ?? false;
+                      const isSavingTranscript = savingTranscript[interview.id] ?? false;
                       
                       return (
                         <Card key={interview.id} className="border shadow-sm">
@@ -2753,6 +2847,113 @@ export function RoleDetail() {
                                         </Button>
                                       </div>
                                     )}
+                                  </div>
+                                </details>
+                              </div>
+                              <div>
+                                <details
+                                  className="group"
+                                  open={callReviewOpen[interview.id] ?? false}
+                                  onToggle={(event) => {
+                                    const details = event.currentTarget;
+                                    if (!details) return;
+                                    setCallReviewOpen((prev) => ({
+                                      ...prev,
+                                      [interview.id]: details.open,
+                                    }));
+                                  }}
+                                >
+                                  <summary className="flex items-center gap-2 cursor-pointer text-sm font-semibold text-slate-700 hover:text-slate-900">
+                                    <FileCheck className="h-4 w-4 text-orange-500" />
+                                    Call Review
+                                    <ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90" />
+                                  </summary>
+                                  <div className="mt-4 space-y-6">
+                                    <div className="rounded-lg border bg-muted/20 p-4 space-y-3">
+                                      <div className="space-y-2">
+                                        <Label className="text-xs font-medium text-slate-600">Actions</Label>
+                                        <div className="flex gap-2">
+                                          <Button
+                                            size="sm"
+                                            variant="secondary"
+                                            className="w-full"
+                                            onClick={() => analyzeTranscript(interview.id, transcriptValue)}
+                                            disabled={!transcriptValue.trim() || isAnalyzing}
+                                          >
+                                            {isAnalyzing ? (
+                                              <>
+                                                <Loader2 className="mr-2 h-3 w-3 animate-spin" /> Analyzing
+                                              </>
+                                            ) : (
+                                              <>
+                                                <Sparkles className="mr-2 h-3 w-3" /> Analyze Transcript
+                                              </>
+                                            )}
+                                          </Button>
+                                        </div>
+                                        <p className="text-xs text-muted-foreground">
+                                          Paste a transcript below to analyze it.
+                                        </p>
+                                      </div>
+
+                                      <div className="space-y-2">
+                                        <div className="flex items-center justify-between">
+                                          <Label className="text-xs font-medium text-slate-600">Transcript</Label>
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-6 text-xs"
+                                            onClick={() => saveTranscript(interview.id, transcriptValue)}
+                                            disabled={isSavingTranscript}
+                                          >
+                                            {isSavingTranscript ? (
+                                              <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                                            ) : (
+                                              <Save className="mr-1 h-3 w-3" />
+                                            )}
+                                            Save
+                                          </Button>
+                                        </div>
+                                        <Textarea
+                                          placeholder="Paste transcript to analyze..."
+                                          className="min-h-[200px] font-mono text-sm resize-y"
+                                          value={transcriptValue}
+                                          onChange={(event) =>
+                                            setTranscripts((prev) => ({
+                                              ...prev,
+                                              [interview.id]: event.target.value,
+                                            }))
+                                          }
+                                        />
+                                      </div>
+
+                                      {analysisValue && (
+                                        <div className="space-y-2 pt-4 border-t">
+                                          <div className="flex items-center justify-between">
+                                            <Label className="text-xs font-medium text-slate-600 flex items-center gap-2">
+                                              <Sparkles className="h-3 w-3 text-primary" /> AI Analysis
+                                            </Label>
+                                            <Button
+                                              variant="ghost"
+                                              size="sm"
+                                              className="h-6 text-xs"
+                                              onClick={() => analyzeTranscript(interview.id, transcriptValue)}
+                                              disabled={isAnalyzing}
+                                            >
+                                              {isAnalyzing ? (
+                                                <Loader2 className="h-3 w-3 animate-spin" />
+                                              ) : (
+                                                <RefreshCw className="h-3 w-3 mr-1" />
+                                              )}
+                                              Regenerate
+                                            </Button>
+                                          </div>
+                                          <div className="p-3 bg-background rounded border text-sm prose prose-sm max-w-none dark:prose-invert whitespace-pre-wrap [&_p]:m-0">
+                                            <ReactMarkdown>{analysisValue}</ReactMarkdown>
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
                                   </div>
                                 </details>
                               </div>

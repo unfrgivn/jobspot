@@ -288,6 +288,9 @@ export async function runMigrations(database: DbClient): Promise<void> {
     { name: "location", definition: "TEXT" },
     { name: "video_link", definition: "TEXT" },
     { name: "follow_up_note", definition: "TEXT" },
+    { name: "rating", definition: "INTEGER" },
+    { name: "transcript", definition: "TEXT" },
+    { name: "analysis_notes", definition: "TEXT" },
   ]);
 
   await addColumnsIfMissing(database, "applications", [
@@ -419,6 +422,7 @@ const INTERVIEW_COLUMNS = [
   "interviewer_name",
   "interviewer_title",
   "outcome",
+  "rating",
   "duration_minutes",
   "location",
   "video_link",
@@ -427,6 +431,8 @@ const INTERVIEW_COLUMNS = [
   "questions_to_ask",
   "research_notes",
   "follow_up_note",
+  "transcript",
+  "analysis_notes",
   "format",
   "interviewers_json",
   "notes",
@@ -781,6 +787,7 @@ CREATE TABLE IF NOT EXISTS interviews (
     interviewer_name TEXT,
     interviewer_title TEXT,
     outcome TEXT,
+    rating INTEGER,
     duration_minutes INTEGER,
     location TEXT,
     video_link TEXT,
@@ -789,6 +796,8 @@ CREATE TABLE IF NOT EXISTS interviews (
     questions_to_ask TEXT,
     research_notes TEXT,
     follow_up_note TEXT,
+    transcript TEXT,
+    analysis_notes TEXT,
     format TEXT,
     interviewers_json TEXT,
     notes TEXT,
@@ -799,11 +808,14 @@ CREATE TABLE IF NOT EXISTS interviews (
 ALTER TABLE interviews ADD COLUMN IF NOT EXISTS interviewer_name TEXT;
 ALTER TABLE interviews ADD COLUMN IF NOT EXISTS interviewer_title TEXT;
 ALTER TABLE interviews ADD COLUMN IF NOT EXISTS outcome TEXT;
+ALTER TABLE interviews ADD COLUMN IF NOT EXISTS rating INTEGER;
 ALTER TABLE interviews ADD COLUMN IF NOT EXISTS google_calendar_event_id TEXT;
 ALTER TABLE interviews ADD COLUMN IF NOT EXISTS prep_notes TEXT;
 ALTER TABLE interviews ADD COLUMN IF NOT EXISTS questions_to_ask TEXT;
 ALTER TABLE interviews ADD COLUMN IF NOT EXISTS research_notes TEXT;
 ALTER TABLE interviews ADD COLUMN IF NOT EXISTS follow_up_note TEXT;
+ALTER TABLE interviews ADD COLUMN IF NOT EXISTS transcript TEXT;
+ALTER TABLE interviews ADD COLUMN IF NOT EXISTS analysis_notes TEXT;
 
 CREATE TABLE IF NOT EXISTS artifacts (
     id TEXT PRIMARY KEY,
