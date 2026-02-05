@@ -874,7 +874,16 @@ OUTPUT FORMAT (exactly this JSON):
         maxTokens: 300,
       });
 
-      parsedMessage = { subject: "", message: fallback.trim() };
+      // Try to parse JSON from the fallback response (may be wrapped in markdown code blocks)
+      try {
+        const parsed = parseJson(fallback) as { subject?: string; message?: string };
+        parsedMessage = {
+          subject: parsed.subject || "",
+          message: parsed.message || fallback.trim(),
+        };
+      } catch {
+        parsedMessage = { subject: "", message: fallback.trim() };
+      }
     }
 
     const storedMessage = JSON.stringify(parsedMessage);
